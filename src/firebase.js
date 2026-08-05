@@ -4,6 +4,9 @@ import { initializeApp } from 'firebase/app';
 import {
   getDatabase, ref, onValue, push, set, update, remove, get, child, off, goOffline, goOnline
 } from 'firebase/database';
+// TallyUni 0.3: 익명 인증 — 새 프로젝트의 RTDB 규칙이 `auth != null`이라
+//   로그인 없이 접근하면 읽기·쓰기가 전부 거부된다. 모든 DB 접근보다 먼저 로그인한다.
+import { getAuth, signInAnonymously } from 'firebase/auth';
 import { gateBayDictWrite } from './bayDictGuard.js';   // V9.05: 베이사전 쓰기 중앙 게이트
 // M6.40: STOWAGE PDF 보관 — Firebase Storage
 import {
@@ -20,14 +23,27 @@ const _cfg = getFirebaseConfig();
 let app = null;
 let db = null;
 let storage = null;
+let auth = null;
+// TallyUni 0.3: 모듈 로드 시점에 익명 로그인을 시작한다(await하지 않는다 — 임포트를 막지 않기 위해).
+//   소비자는 fbAuthReady()로 완료를 기다린다. 실패해도 앱은 뜬다(콘솔 경고 + 이후 DB 호출이 거부될 뿐).
+let _authP = null;
 if (_cfg && _cfg.databaseURL) {
   app = initializeApp(_cfg);
   db = getDatabase(app);
   storage = getStorage(app);  // M6.40
+  auth = getAuth(app);
+  _authP = signInAnonymously(auth).catch(e => { console.warn('[auth] 익명 로그인 실패', e); return null; });
 }
 
 /** TallyUni 0.2: Firebase가 실제로 초기화됐는가 (= 첫 실행 마법사를 마쳤는가). */
 export const hasFirebase = () => !!db;
+
+/** TallyUni 0.3: 익명 로그인이 끝날 때까지 기다린다. 미설정이면 false(기다릴 것 없음). */
+export async function fbAuthReady() {
+  if (!db) return false;
+  await _authP;
+  return true;
+}
 
 // === M6.40: STOWAGE PDF 보관 ===
 // V9.57(G14): 참조 0인 죽은 export 삭제 — fbCleanupExpiredStowagePdfs·fbDeleteStowagePdf

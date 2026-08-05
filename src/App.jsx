@@ -7,7 +7,7 @@ import {
   fbSubscribeVoyages, fbSubscribeInspectors, fbSetInspector,
   fbSubscribeConnection, fbSetInspectorActivity, fbLogoutInspector, fbSubscribePortMis, fbSubscribePilotForecast, fbSubscribeTerminalWork,
   fbSubscribeStaffList, fbSubscribeDeletedStaff, fbSubscribeShipBayDict, fbSubscribeHeartbeat,
-  fbSubscribeMatrixEditors, fbGetAdminGuard, fbReconnect, hasFirebase
+  fbSubscribeMatrixEditors, fbGetAdminGuard, fbReconnect, hasFirebase, fbAuthReady
 } from './firebase.js';
 import { tenant } from './tenant.js';               // TallyUni 0.2: 회사·앱 이름 단일 소스
 import SetupWizard from './pages/SetupWizard.jsx';  // TallyUni 0.2: 첫 실행 마법사(미설정 상태 전용 화면)
@@ -113,6 +113,14 @@ export default function App() {
     // TallyUni 0.2: Firebase 미설정(첫 실행)이면 구독을 아예 걸지 않는다 — db가 null이라 ref()가 던진다.
     //   이 상태에서는 아래 렌더 게이트가 SetupWizard만 그린다.
     if (!hasFirebase()) return;
+    // TallyUni 0.3: 보안 규칙이 `auth != null`이라 익명 로그인이 끝나기 전에 구독을 걸면
+    //   전부 permission_denied로 끊긴다. 로그인 완료를 기다린 뒤에 등록한다.
+    //   해제 함수는 subs 배열에 모아 cleanup에서 호출한다(await 사이에 언마운트되면 alive=false로 등록 자체를 건너뛴다).
+    let alive = true;
+    const subs = [];
+    (async () => {
+      await fbAuthReady();
+      if (!alive) return;
     const u1 = fbSubscribeVoyages((v) => { setVoyages(v); setVoyagesLoaded(true); });
     const u2 = fbSubscribeInspectors(setInspectors);
     // TallyOne 1.0 (K5): 서버 직책을 staffList 모듈 캐시에 먼저 밀어 넣고(setServerRoles),
@@ -162,7 +170,9 @@ export default function App() {
         console.error('[App] 베이사전 정본 대조 실패', err);
       }
     });
-    return () => { u1(); u2(); u3(); u4(); u4b(); u4c(); u5(); u6(); u7(); unsub2(); unsub3(); };
+    subs.push(u1, u2, u3, u4, u4b, u4c, u5, u6, u7, unsub2, unsub3);
+    })();
+    return () => { alive = false; subs.forEach(f => { try { f(); } catch (e) { /* skip */ } }); };
   }, []);
 
   useEffect(() => {
@@ -170,7 +180,12 @@ export default function App() {
     //   콘솔에 오류만 남긴다(마법사 화면에서 무의미). 게이트를 구독 useEffect와 같은 조건으로 맞춘다.
     if (!hasFirebase()) return;
     let alive = true;
-    fbGetAdminGuard().then(g => { if (alive) setAdminGuard(g); }).catch(() => {});
+    // TallyUni 0.3: 익명 로그인 뒤에 조회 — 로그인 전이면 규칙(auth != null)에 막혀 항상 실패한다.
+    (async () => {
+      await fbAuthReady();
+      if (!alive) return;
+      fbGetAdminGuard().then(g => { if (alive) setAdminGuard(g); }).catch(() => {});
+    })();
     return () => { alive = false; };
   }, [inspector]);
   const isAdmin = isAdminName(adminGuard, inspector);

@@ -1,7 +1,7 @@
 // TallyUni 0.2: 첫 실행 마법사 — Firebase 접속 설정·회사 정보·최초 관리자를 받아 테넌트를 만든다.
 //   왜: 2판에서 Firebase 하드코딩을 걷어냈다(firebase.js). 설정이 없으면 db=null이라
 //   App이 hasFirebase() 게이트에서 이 화면만 그린다(로그인·라우팅 전부 건너뜀).
-//   완료 시 ① localStorage 2키 저장 ② 입력한 설정으로 보조 앱('wizard')을 띄워 settings·staffList 시딩
+//   완료 시 ① localStorage 2키 저장 ② 입력한 설정으로 보조 앱('wizard')을 띄워 익명 로그인 후 settings·staffList 시딩(0.3)
 //   ③ location.reload() — 리로드해야 firebase.js가 모듈 로드 시점에 새 설정을 읽는다.
 import React, { useState } from 'react';
 import { Anchor, Database, Building2, UserCog, Check, AlertCircle, Image as ImageIcon } from 'lucide-react';
@@ -154,7 +154,11 @@ export default function SetupWizard() {
     try {
       const { initializeApp } = await import('firebase/app');
       const { getDatabase, ref, set } = await import('firebase/database');
+      const { getAuth, signInAnonymously } = await import('firebase/auth');
       const wApp = initializeApp(cfg, 'wizard');
+      // TallyUni 0.3: 보안 규칙 `auth != null` — 시딩 쓰기 전에 이 보조 앱으로도 익명 로그인한다.
+      //   실패하면 아래 catch가 받아 기존 실패 문구 경로로 간다(설정은 이미 localStorage에 저장됨).
+      await signInAnonymously(getAuth(wApp));
       const wDb = getDatabase(wApp);
       await set(ref(wDb, 'settings'), tcfg);
       await set(ref(wDb, `staffList/${tcfg.owner}`), { name: tcfg.owner, role: ownerRole.trim() || '수석검수사', addedAt: Date.now() });

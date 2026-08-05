@@ -14,7 +14,7 @@ import {
   verifyPasswordFor, needsPasswordSetup, hasSessionPassFor, setSessionPassFor,
   isLockedName, lockEntry, lockPath, ownerCanUnlock,
 } from '../adminGuard.js';
-import { fbGetAdminGuard, fbUpdateAdminGuard } from '../firebase.js';
+import { fbGetAdminGuard, fbUpdateAdminGuard, fbAuthReady } from '../firebase.js';
 import { useBackHandler } from '../backHandler.js';
 import { tenant, wizardDone } from '../tenant.js';   // TallyUni 0.1: 회사명 · 0.2: 마법사 완료 여부
 
@@ -36,10 +36,16 @@ export default function LoginPage({ current = '', inspectors, extraStaff = {}, d
     let alive = true;
     // V9.45 계승: 조회가 어떤 이유로 실패해도 guardLoaded는 반드시 세운다.
     //   안 세우면 로딩 검사(handlePick 첫 줄)에 걸려 아무도 로그인하지 못한다.
-    fbGetAdminGuard()
-      .then(g => { if (alive) setGuard(g); })
-      .catch(e => { console.error('[guard] 조회 실패', e); })
-      .finally(() => { if (alive) setGuardLoaded(true); });
+    // TallyUni 0.3: 익명 로그인(fbAuthReady) 완료 후에 조회한다 — 규칙이 auth != null이라
+    //   로그인 전 조회는 반드시 permission_denied로 실패한다.
+    (async () => {
+      await fbAuthReady();
+      if (!alive) { return; }
+      fbGetAdminGuard()
+        .then(g => { if (alive) setGuard(g); })
+        .catch(e => { console.error('[guard] 조회 실패', e); })
+        .finally(() => { if (alive) setGuardLoaded(true); });
+    })();
     return () => { alive = false; };
   }, []);
 
