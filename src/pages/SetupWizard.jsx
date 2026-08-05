@@ -1,8 +1,12 @@
 // TallyUni 0.2: 첫 실행 마법사 — Firebase 접속 설정·회사 정보·최초 관리자를 받아 테넌트를 만든다.
 //   왜: 2판에서 Firebase 하드코딩을 걷어냈다(firebase.js). 설정이 없으면 db=null이라
 //   App이 hasFirebase() 게이트에서 이 화면만 그린다(로그인·라우팅 전부 건너뜀).
-//   완료 시 ① localStorage 2키 저장 ② 입력한 설정으로 보조 앱('wizard')을 띄워 익명 로그인 후 settings·staffList 시딩(0.3)
+//   완료 시 ① localStorage 2키 저장 ② 입력한 설정으로 보조 앱을 띄워 익명 로그인 후 settings·staffList 시딩(0.3)
 //   ③ location.reload() — 리로드해야 firebase.js가 모듈 로드 시점에 새 설정을 읽는다.
+// TallyUni 0.4: 두 번째 기기 흐름 — 1단계에서 설정을 읽자마자 그 프로젝트의 settings 노드를 먼저 조회한다.
+//   이미 다른 기기가 마법사를 마친 회사면 2·3단계를 다시 받을 이유가 없다(회사명·모항·로고를 또 입력하면
+//   기기마다 값이 어긋난다). 있으면 DB의 settings를 그대로 tenantCfg로 받아 저장하고 바로 시작한다.
+//   이 경로에서는 staffList를 건드리지 않는다 — 두 번째 기기가 기존 소유자의 직책을 덮어쓰면 안 되기 때문.
 import React, { useState } from 'react';
 import { Anchor, Database, Building2, UserCog, Check, AlertCircle, Image as ImageIcon } from 'lucide-react';
 import { SK } from '../utils.js';
@@ -68,6 +72,27 @@ function shrinkLogo(file) {
   });
 }
 
+// TallyUni 0.3: 마법사 보조 앱 — 기본 앱(firebase.js)은 설정이 없어 초기화되지 않았으므로(db=null)
+//   입력받은 설정으로 잠깐 별도 앱을 띄워 서버를 읽고 쓴다. 보안 규칙 `auth != null` 때문에 익명 로그인 필수.
+// TallyUni 0.4: 쓰고 나면 반드시 정리한다(signOut + deleteApp).
+//   왜: 정리하지 않으면 이 익명 UID 세션이 살아 있는 채로 location.reload()가 돌고, 리로드 뒤 기본 앱이
+//   따로 익명 로그인을 하면서 쓰다 버린 UID가 프로젝트에 계속 쌓인다. 이름도 매번 새로 만든다 —
+//   같은 이름으로 다시 initializeApp하면 (설정을 고쳐 다시 시도한 경우) 옵션 불일치로 던진다.
+export async function withWizardApp(cfg, fn) {
+  const { initializeApp, deleteApp } = await import('firebase/app');
+  const { getAuth, signInAnonymously, signOut } = await import('firebase/auth');
+  const wApp = initializeApp(cfg, `wizard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const wAuth = getAuth(wApp);
+  try {
+    await signInAnonymously(wAuth);
+    return await fn(wApp);
+  } finally {
+    // 정리 실패가 본 작업을 되돌리면 안 된다 — 사유만 남기고 넘어간다(조용한 실패 금지).
+    try { await signOut(wAuth); } catch (e) { console.warn('[wizard] signOut 실패(무시)', e); }
+    try { await deleteApp(wApp); } catch (e) { console.warn('[wizard] deleteApp 실패(무시)', e); }
+  }
+}
+
 const IN = 'w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-600';
 const LB = 'block text-[12px] font-bold text-slate-400 mb-1';
 
@@ -92,6 +117,12 @@ export default function SetupWizard() {
   const [busy, setBusy] = useState(false);
   const [saveErr, setSaveErr] = useState('');
 
+  // TallyUni 0.4: 1단계에서 서버를 먼저 들여다본 결과.
+  //   found = DB에 이미 있는 settings(= 다른 기기가 마친 회사 설정), null이면 처음 여는 프로젝트.
+  const [probing, setProbing] = useState(false);
+  const [probeErr, setProbeErr] = useState('');
+  const [found, setFound] = useState(null);
+
   // ── 1단계: Firebase 설정 붙여넣기 ──
   const handleParse = (text) => {
     setRaw(text);
@@ -106,6 +137,47 @@ export default function SetupWizard() {
     }
     setCfg(c);
     setCfgErr('');
+  };
+
+  // TallyUni 0.4: 1단계 → 다음. 회사 정보를 받기 전에 그 프로젝트에 settings가 이미 있는지 본다.
+  const handleStep1Next = async () => {
+    if (!cfg || probing) return;
+    setProbing(true);
+    setProbeErr('');
+    let existing = null;
+    try {
+      existing = await withWizardApp(cfg, async (wApp) => {
+        const { getDatabase, ref, get } = await import('firebase/database');
+        const snap = await get(ref(getDatabase(wApp), 'settings'));
+        return snap.exists() ? snap.val() : null;
+      });
+    } catch (e) {
+      // 조용히 넘어가면 "회사 정보를 왜 또 묻지" 상태가 된다 — 사유를 보여 주고 새로 설정할 길을 남긴다.
+      setProbing(false);
+      setProbeErr(`데이터베이스를 확인하지 못했습니다: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    setProbing(false);
+    // 회사명이 있어야 사람이 알아볼 수 있는 설정이다. 껍데기만 있으면 처음 여는 것으로 본다.
+    if (existing && typeof existing === 'object' && String(existing.company || '').trim()) setFound(existing);
+    else setStep(2);
+  };
+
+  // TallyUni 0.4: [불러오고 시작] — DB의 settings를 그대로 이 기기의 tenantCfg로 삼는다(로고 포함).
+  //   staffList는 손대지 않는다(기존 소유자·직책 보존).
+  const handleUseExisting = () => {
+    if (!cfg || !found || busy) return;
+    setBusy(true);
+    setSaveErr('');
+    try {
+      localStorage.setItem(SK.fbCfg, JSON.stringify(cfg));
+      localStorage.setItem(SK.tenantCfg, JSON.stringify(found));
+    } catch (e) {
+      setBusy(false);
+      setSaveErr(`브라우저 저장에 실패했습니다(${e.message}). 시크릿 모드라면 일반 창에서 다시 시도하세요.`);
+      return;
+    }
+    location.reload();
   };
 
   const handleLogo = async (e) => {
@@ -150,18 +222,16 @@ export default function SetupWizard() {
       return;
     }
     // ② 입력한 설정으로 보조 앱을 띄워 서버에 첫 데이터를 심는다.
-    //    이름 붙인 앱('wizard')이라 리로드 후 기본 앱과 충돌하지 않는다.
+    //    기본 앱과 다른 이름이라 리로드 후 충돌하지 않는다. 끝나면 withWizardApp이 세션을 정리한다(0.4).
     try {
-      const { initializeApp } = await import('firebase/app');
-      const { getDatabase, ref, set } = await import('firebase/database');
-      const { getAuth, signInAnonymously } = await import('firebase/auth');
-      const wApp = initializeApp(cfg, 'wizard');
-      // TallyUni 0.3: 보안 규칙 `auth != null` — 시딩 쓰기 전에 이 보조 앱으로도 익명 로그인한다.
-      //   실패하면 아래 catch가 받아 기존 실패 문구 경로로 간다(설정은 이미 localStorage에 저장됨).
-      await signInAnonymously(getAuth(wApp));
-      const wDb = getDatabase(wApp);
-      await set(ref(wDb, 'settings'), tcfg);
-      await set(ref(wDb, `staffList/${tcfg.owner}`), { name: tcfg.owner, role: ownerRole.trim() || '수석검수사', addedAt: Date.now() });
+      await withWizardApp(cfg, async (wApp) => {
+        const { getDatabase, ref, set, update } = await import('firebase/database');
+        const wDb = getDatabase(wApp);
+        await set(ref(wDb, 'settings'), tcfg);
+        // TallyUni 0.4: set → update. set은 그 사람 노드를 통째로 갈아엎어서, 앱 안에서 붙은
+        //   다른 필드(직책 변경·부가 정보)가 마법사를 다시 돌릴 때마다 사라졌다.
+        await update(ref(wDb, `staffList/${tcfg.owner}`), { name: tcfg.owner, role: ownerRole.trim() || '수석검수사', addedAt: Date.now() });
+      });
     } catch (e) {
       // 조용히 실패 금지 — 사유를 보여 주고, 그래도 진행할 수 있게 한다(설정은 이미 저장됨).
       setBusy(false);
@@ -195,8 +265,41 @@ export default function SetupWizard() {
           <StepDot n={3} label="최초 관리자" icon={UserCog} />
         </div>
 
+        {/* ── TallyUni 0.4: 이미 있는 회사 설정을 찾은 경우 — 2·3단계를 건너뛰는 갈림길 ── */}
+        {found && (
+          <div className="space-y-3">
+            <div className="bg-emerald-950/40 border border-emerald-800 rounded-lg p-3">
+              <div className="text-emerald-300 font-bold text-[13px] mb-1">기존 회사 설정을 찾았습니다</div>
+              <div className="text-slate-200 text-[15px] font-black">{found.company}</div>
+              <div className="text-[11px] text-slate-400 mt-2 space-y-0.5">
+                {found.homePortName && <div>모항 · {found.homePortName} ({found.homePort})</div>}
+                {found.appTitle && <div>앱 이름 · {found.appTitle}</div>}
+                {found.owner && <div>소유자 · {found.owner}</div>}
+              </div>
+              {found.logo && <img src={found.logo} alt="회사 로고" className="mt-2 h-14 object-contain bg-slate-900 rounded border border-slate-800 p-1" />}
+            </div>
+            <div className="text-[12px] text-slate-400 leading-relaxed bg-slate-900/50 border border-slate-800 rounded-lg p-3">
+              다른 기기에서 이미 설정을 마친 회사입니다. 불러오면 회사 정보·모항·로고를 다시 입력하지 않아도 되고,
+              직원 명단도 그대로 씁니다.
+            </div>
+            {saveErr && (
+              <div className="bg-red-950/50 border border-red-800 rounded-lg p-3 text-red-300 text-[12px] flex gap-2 whitespace-pre-line">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><div>{saveErr}</div>
+              </div>
+            )}
+            <button disabled={busy} onClick={handleUseExisting}
+                    className="w-full py-3 rounded-lg font-bold bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-800 disabled:text-slate-600 text-white">
+              {busy ? '불러오는 중…' : '불러오고 시작'}
+            </button>
+            <button onClick={() => { setFound(null); setStep(2); }}
+                    className="w-full py-2 rounded-lg font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 text-[12px]">
+              새로 설정 — 회사 정보를 다시 입력합니다
+            </button>
+          </div>
+        )}
+
         {/* ── 1단계 ── */}
-        {step === 1 && (
+        {!found && step === 1 && (
           <div className="space-y-3">
             <div className="text-[12px] text-slate-400 leading-relaxed bg-slate-900/50 border border-slate-800 rounded-lg p-3">
               Firebase 콘솔 → 프로젝트 설정 → 내 앱 → <b className="text-slate-200">firebaseConfig</b> 부분을 통째로 복사해 아래에 붙여넣으세요.
@@ -223,16 +326,27 @@ export default function SetupWizard() {
                 ))}
               </div>
             )}
+            {probeErr && (
+              <div className="bg-red-950/50 border border-red-800 rounded-lg p-3 text-red-300 text-[12px] flex gap-2 whitespace-pre-line">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><div>{probeErr}</div>
+              </div>
+            )}
             <button
-              disabled={!cfg}
-              onClick={() => setStep(2)}
+              disabled={!cfg || probing}
+              onClick={handleStep1Next}
               className="w-full py-3 rounded-lg font-bold bg-blue-700 hover:bg-blue-600 disabled:bg-slate-800 disabled:text-slate-600 text-white"
-            >다음 — 회사 정보</button>
+            >{probing ? '데이터베이스 확인 중…' : '다음 — 회사 정보'}</button>
+            {probeErr && (
+              <button onClick={() => { setProbeErr(''); setStep(2); }}
+                      className="w-full py-2 rounded-lg font-bold bg-amber-800 hover:bg-amber-700 text-amber-100 text-[12px]">
+                그래도 계속 — 새로 설정하기
+              </button>
+            )}
           </div>
         )}
 
         {/* ── 2단계 ── */}
-        {step === 2 && (
+        {!found && step === 2 && (
           <div className="space-y-3">
             <div>
               <label className={LB}>회사명 (한글) *</label>
@@ -282,7 +396,7 @@ export default function SetupWizard() {
         )}
 
         {/* ── 3단계 ── */}
-        {step === 3 && (
+        {!found && step === 3 && (
           <div className="space-y-3">
             <div className="text-[12px] text-slate-400 leading-relaxed bg-slate-900/50 border border-slate-800 rounded-lg p-3">
               앱의 <b className="text-slate-200">소유자</b>가 될 사람입니다. 권한을 회수할 수 없고, 직원 명단·매트릭스 권한을 관리합니다.
@@ -317,7 +431,7 @@ export default function SetupWizard() {
         )}
 
         <div className="mt-auto pt-6 text-center text-[10px] text-slate-600 leading-relaxed">
-          설정은 이 브라우저와 데이터베이스에 저장됩니다. 다른 기기에서는 같은 설정을 한 번 더 입력하면 됩니다.
+          설정은 이 브라우저와 데이터베이스에 저장됩니다. 다른 기기에서는 1단계의 Firebase 설정만 붙여넣으면 나머지는 서버에서 불러옵니다.
         </div>
       </div>
     </div>
