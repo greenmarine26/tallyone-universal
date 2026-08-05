@@ -6,3 +6,4 @@ index.html.production.bak
 _t*.mjs
 _render*.mjs
 *.log
+*.zip

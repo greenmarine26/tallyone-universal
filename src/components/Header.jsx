@@ -10,6 +10,7 @@ import GeminiKeyModal from './GeminiKeyModal.jsx';
 import ClaudeMemoModal from './ClaudeMemoModal.jsx';   // TallyOne 1.1: 클로드에게 메모 모달
 import ConfirmModal, { useConfirm } from './ConfirmModal.jsx';
 import { getEquipNumber, setEquipNumber, _storage, SK, getPierFromBerth, equipNumbersForPier } from '../utils.js';
+import { tenant } from '../tenant.js';   // TallyUni 0.1: 회사명 단일 소스
 
 export default function Header({ version, inspector, online, route, voyages, onChangeInspector, onGoHome, onLogout, onOpenStaffManager, onOpenAux }) {
   const cur = route.name === 'voyage' ? voyages[route.voyageKey] : null;
@@ -80,7 +81,7 @@ export default function Header({ version, inspector, online, route, voyages, onC
             </div>
             <div className="text-[10px] text-slate-500 truncate leading-tight">
               {/* V8.82: 모드 따라 항차 표시 — 양하=voy_d, 선적=voy_l (구: 항상 voy_d 우선이라 선적 중에도 양하 항차가 보임) */}
-              {info ? `${(route?.mode === 'loading' ? (info.voy_l || info.voy_d) : (info.voy_d || info.voy_l)) || info.voy || ''} · ${info.carrier || ''}` : '🌊 그린마린 검수팀 전용'}
+              {info ? `${(route?.mode === 'loading' ? (info.voy_l || info.voy_d) : (info.voy_d || info.voy_l)) || info.voy || ''} · ${info.carrier || ''}` : `🌊 ${tenant().company} 검수팀 전용`}
             </div>
           </div>
         </div>

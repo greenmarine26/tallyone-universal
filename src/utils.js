@@ -1,5 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
-export const APP_VERSION = 'TallyOne 1.10-01';   // 인쇄 허브(카고플랜·검수 리스트) ▲긴급·🧳수화물 마커 유실 수리 — tagForecastMarks 공용 승격
+import { tenant, TENANT_DEFAULTS } from './tenant.js';
+export const APP_VERSION = 'TallyUni 0.1';   // 범용판 1판 — 테넌트 설정 단일화(tenant.js)
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가
@@ -3033,14 +3034,26 @@ export function buildContainerColorMap(containers, mode) {
 //   PTK 약어 등. 기존엔 /(PTK|PYT)$/ 만 봐서 KRPYOTM이 누락됐다
 //   (선적 리스트가 KRPYOTM 표기 → 평택분이 표시 안 되던 버그).
 //   새 평택 코드가 나오면 이 배열에만 추가하면 전 화면 일괄 반영.
+//   TallyUni 0.1: 모항(홈포트)은 tenant().homePort / homePortAliases 단일 소스에서 온다.
+//   기본 테넌트(KRPTK)는 아래 확장 변형·접미 규칙을 그대로 유지 — 동작 완전 보존.
+//   타 테넌트는 그 테넌트의 별칭(+3자 접미)만 본다. 함수명·시그니처는 그대로(호출부 무수정).
 const PYEONGTAEK_CODES = ['PTK', 'KRPTK', 'KRPYT', 'PYT', 'KRPYOTM', 'PYOTM', 'KRPYO'];
+const PYEONGTAEK_SUFFIX = /(PTK|PYT|PYOTM|PYO)$/;
 export function isPyeongtaekPort(code) {
   if (!code) return false;
   const t = String(code).toUpperCase().trim();
   if (!t) return false;
-  if (PYEONGTAEK_CODES.includes(t)) return true;
-  // 접미 매칭: ...PTK, ...PYT, ...PYOTM, ...PYO 로 끝나면 평택
-  return /(PTK|PYT|PYOTM|PYO)$/.test(t);
+  const T = tenant();
+  const aliases = [T.homePort, ...(T.homePortAliases || [])]
+    .filter(Boolean).map((a) => String(a).toUpperCase().trim());
+  if (aliases.includes(t)) return true;
+  if (T.homePort === TENANT_DEFAULTS.homePort) {
+    if (PYEONGTAEK_CODES.includes(t)) return true;
+    // 접미 매칭: ...PTK, ...PYT, ...PYOTM, ...PYO 로 끝나면 평택
+    return PYEONGTAEK_SUFFIX.test(t);
+  }
+  // 타 테넌트: 별칭의 3자 접미로 끝나면 모항 (KRPUS ↔ PUS)
+  return aliases.some((a) => a.length >= 3 && t.endsWith(a.length > 3 ? a.slice(-3) : a));
 }
 
 // ─── V9.57: 공용 헬퍼 신설 (감사 F6) — 흩어진 지역 규칙의 단일 소스 ──────────

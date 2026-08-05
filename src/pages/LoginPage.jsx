@@ -16,6 +16,7 @@ import {
 } from '../adminGuard.js';
 import { fbGetAdminGuard, fbUpdateAdminGuard } from '../firebase.js';
 import { useBackHandler } from '../backHandler.js';
+import { tenant } from '../tenant.js';   // TallyUni 0.1: 회사명 단일 소스
 
 export default function LoginPage({ current = '', inspectors, extraStaff = {}, deletedStaff = {}, notice = '', onSelect, onCancel = null }) {
   const [newName, setNewName] = useState('');
@@ -165,7 +166,7 @@ export default function LoginPage({ current = '', inspectors, extraStaff = {}, d
     if (!isAllowed(raw)) {
       const hint = allWhitelist.filter(n => n.includes(raw.slice(0, 2)) || raw.includes(n.slice(0, 2)));
       const hintTxt = hint.length > 0 ? `\n\n비슷한 이름: ${hint.slice(0, 5).join(', ')}` : '';
-      alert(`"${raw}" — 그린마린 직원 명단에 없습니다.\n정확한 이름으로 입력하세요.${hintTxt}\n\n새 직원 등록은 관리자(${getAdminNames(guard).join(', ')})에게 요청하세요.`);
+      alert(`"${raw}" — ${tenant().company} 직원 명단에 없습니다.\n정확한 이름으로 입력하세요.${hintTxt}\n\n새 직원 등록은 관리자(${getAdminNames(guard).join(', ')})에게 요청하세요.`);
       return;
     }
     const norm = normalizeName(raw);

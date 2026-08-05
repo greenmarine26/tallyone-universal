@@ -5,6 +5,7 @@
 //   기존 records(실번호 수정/리씰/실오류) + completed(처리)를 병합해 생성.
 
 import { isoToLabel } from './utils.js';
+import { tenant } from './tenant.js';   // TallyUni 0.1: 회사·주소 단일 소스
 
 // 모드 구역(discharge/loading)에서 처리된(=completed) 컨 목록을 만든다.
 //   records의 수정 필드(sl/sl_orig/eseal/eseal_wrong/reseal)를 ediContainers에 덮어쓴다.
@@ -63,7 +64,7 @@ function tally(rows) {
 export function buildActualSealListText(meta, rows) {
   const diff = rows.filter(r => r.sealError || r.hasReseal || r.esealWrong);
   const lines = [];
-  lines.push('GREEN MARINE CO., LTD.   PYEONGTAEK, KOREA');
+  lines.push(`${tenant().companyEn}   ${tenant().addressEn}`);
   lines.push('ACTUAL CONTAINER & SEAL NUMBER LIST');
   lines.push(`M/V : ${meta.vsl || ''}    VOY.NO : ${meta.voy || ''}    DATE : ${meta.date || ''}`);
   lines.push(`PORT : ${meta.port || 'PYEONGTAEK, KOREA'}    MODE : ${meta.mode === 'discharge' ? '양하' : '선적'}`);

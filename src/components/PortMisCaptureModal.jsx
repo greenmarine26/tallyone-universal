@@ -9,6 +9,16 @@ import { fbSavePortMisBatch, fbReplacePortMisBatch, fbSubscribePortMis, db } fro
 import { ref, remove } from 'firebase/database';
 import { _storage, SK, parsePortMisExcel, getPierFromBerth, formatBerth } from '../utils.js';
 import { GEMINI_API_KEY } from '../gemini.js';
+import { tenant } from '../tenant.js';   // TallyUni 0.1: 터미널 목록 단일 소스
+
+// TallyUni 0.1: 터미널 칩 색 — 테넌트 터미널 순서대로 돌려 쓴다(하드코딩 PCTC/PNCT 제거).
+//   Tailwind JIT가 찾을 수 있도록 클래스 문자열을 리터럴로 둔다.
+const TERM_CHIP = [
+  'bg-blue-900/50 border border-blue-700/50 text-blue-200',
+  'bg-purple-900/50 border border-purple-700/50 text-purple-200',
+  'bg-emerald-900/50 border border-emerald-700/50 text-emerald-200',
+  'bg-amber-900/50 border border-amber-700/50 text-amber-200',
+];
 
 export default function PortMisCaptureModal({ onClose }) {
   const [step, setStep] = useState('pick');  // pick → analyzing → review → saving → done | view
@@ -205,17 +215,14 @@ export default function PortMisCaptureModal({ onClose }) {
               <div className="flex gap-2 mb-3 text-xs flex-wrap">
                 {(() => {
                   const all = Object.values(currentData || {});
-                  const pctc = all.filter(v => v?.pier === 'PCTC').length;
-                  const pnct = all.filter(v => v?.pier === 'PNCT').length;
                   const noBerth = all.filter(v => !v?.berth).length;
                   return (
                     <>
-                      <span className="bg-blue-900/50 border border-blue-700/50 text-blue-200 px-2 py-1 rounded font-bold">
-                        PCTC {pctc}
-                      </span>
-                      <span className="bg-purple-900/50 border border-purple-700/50 text-purple-200 px-2 py-1 rounded font-bold">
-                        PNCT {pnct}
-                      </span>
+                      {tenant().terminals.map((t, i) => (
+                        <span key={t.code} className={`${TERM_CHIP[i % TERM_CHIP.length]} px-2 py-1 rounded font-bold`}>
+                          {t.name} {all.filter(v => v?.pier === t.code).length}
+                        </span>
+                      ))}
                       {noBerth > 0 && (
                         <span className="bg-red-900/50 border border-red-700/50 text-red-200 px-2 py-1 rounded font-bold">
                           ⚠ 부두 없음 (옛 데이터) {noBerth}
@@ -299,17 +306,14 @@ export default function PortMisCaptureModal({ onClose }) {
               {/* M5.82: 부두별 통계 */}
               <div className="flex gap-2 mb-3 text-xs">
                 {(() => {
-                  const pctcCnt = ships.filter(s => s.pier === 'PCTC').length;
-                  const pnctCnt = ships.filter(s => s.pier === 'PNCT').length;
                   const otherCnt = ships.filter(s => !s.pier).length;
                   return (
                     <>
-                      <span className="bg-blue-900/50 border border-blue-700/50 text-blue-200 px-2 py-1 rounded font-bold">
-                        PCTC {pctcCnt}척
-                      </span>
-                      <span className="bg-purple-900/50 border border-purple-700/50 text-purple-200 px-2 py-1 rounded font-bold">
-                        PNCT {pnctCnt}척
-                      </span>
+                      {tenant().terminals.map((t, i) => (
+                        <span key={t.code} className={`${TERM_CHIP[i % TERM_CHIP.length]} px-2 py-1 rounded font-bold`}>
+                          {t.name} {ships.filter(s => s.pier === t.code).length}척
+                        </span>
+                      ))}
                       {otherCnt > 0 && (
                         <span className="bg-slate-800 border border-slate-700 text-slate-400 px-2 py-1 rounded font-bold">
                           기타 {otherCnt}척

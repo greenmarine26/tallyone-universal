@@ -4,18 +4,20 @@
 //   시트 구성·순서는 실물 233개 분석 결과(마감텔리_양식_카탈로그) 그대로:
 //   Final Work → Time Sheet → OS-IN → DM-IN → OS-OUT → DM-OUT → Act. Cntr-Seal → RF → Performance → SHIFTING
 
+import { tenant } from './tenant.js';   // TallyUni 0.1: 회사·주소 단일 소스
+
 const THIN = { style: 'thin' };
 const CTR = { horizontal: 'center', vertical: 'middle' };   // V9.19-03: 드로잉 폴백도 전부 중앙정렬(사용자 확정)
 const BOX = { top: THIN, left: THIN, bottom: THIN, right: THIN };
 const TITLE_FONT = { name: 'Arial', size: 14, bold: true };
 const HEAD_FONT = { name: 'Arial', size: 10, bold: true };
 const BODY_FONT = { name: 'Arial', size: 10 };
-const CO = 'GREEN  MARINE  CO., LTD.';
-const CITY = 'PYEONGTAEK, KOREA';
+const CO = () => tenant().companyEn;      // TallyUni 0.1: 리터럴 → 테넌트 값
+const CITY = () => tenant().addressEn;
 
 function head(ws, cols) {
-  ws.getCell('A1').value = CO; ws.getCell('A1').font = { ...HEAD_FONT, size: 12 };
-  ws.getCell('A2').value = CITY; ws.getCell('A2').font = BODY_FONT;
+  ws.getCell('A1').value = CO(); ws.getCell('A1').font = { ...HEAD_FONT, size: 12 };
+  ws.getCell('A2').value = CITY(); ws.getCell('A2').font = BODY_FONT;
   void cols;
 }
 function sig(ws, row, leftLabel = 'CHIEF CHECKER', rightLabel = 'CHIEF OFFICER', rightCol = 'K', midLabel = '', midCol = 'F') {
@@ -32,7 +34,7 @@ const nz = (v) => (v ? v : '');   // 실물 규칙: 빈 셀은 0이 아니라 �
 function sheetFinalWork(wb, D) {
   const ws = wb.addWorksheet('Final Work');
   ws.columns = [{ width: 9 }, { width: 7 }, { width: 12 }, ...Array(12).fill({ width: 6.5 })];
-  ws.mergeCells('A1:O1'); ws.getCell('A1').value = CO;
+  ws.mergeCells('A1:O1'); ws.getCell('A1').value = CO();
   ws.getCell('A1').font = TITLE_FONT; ws.getCell('A1').alignment = { horizontal: 'center' };
   ws.mergeCells('A2:O2'); ws.getCell('A2').value = 'FINAL  WORKING  REPORT';
   ws.getCell('A2').font = { ...TITLE_FONT, size: 12, underline: true }; ws.getCell('A2').alignment = { horizontal: 'center' };
@@ -42,7 +44,7 @@ function sheetFinalWork(wb, D) {
   ws.getCell('L4').value = 'DATE :'; ws.getCell('M4').value = d10(D.date);
   ws.getCell('A6').value = 'PIER :'; ws.getCell('B6').value = ` ${D.pier}`;
   ws.getCell('F6').value = 'BERTH :'; ws.getCell('G6').value = D.berth;
-  ws.getCell('L6').value = 'PORT :'; ws.getCell('M6').value = ' PYEONGTAEK, KOREA';
+  ws.getCell('L6').value = 'PORT :'; ws.getCell('M6').value = ` ${CITY()}`;
   for (const a of ['A4', 'F4', 'L4', 'A6', 'F6', 'L6']) ws.getCell(a).font = HEAD_FONT;
 
   // 표 헤더 — OPERATOR | PORT | F/E | DISCH(n) 4칸 | LOAD(n) 4칸 | SHIFT(n) 4칸
@@ -114,7 +116,7 @@ function sheetTimeSheet(wb, D) {
   ws.getCell('A8').value = 'PIER :'; ws.getCell('B8').value = ` ${D.pier}`;
   ws.getCell('C8').value = 'BERTH :'; ws.getCell('D8').value = D.berth;
   ws.getCell('G8').value = 'WEATHER :'; ws.getCell('H8').value = 'Fine';
-  ws.getCell('G10').value = 'PORT : PYEONGTAEK, KOREA';
+  ws.getCell('G10').value = `PORT : ${CITY()}`;
   for (const a of ['A6','C6','G6','A8','C8','G8','G10']) ws.getCell(a).font = HEAD_FONT;
   ws.getCell('B12').value = 'T I M E'; ws.getCell('C12').value = 'R E M A R K S';
   ws.getCell('B12').font = HEAD_FONT; ws.getCell('C12').font = HEAD_FONT;
@@ -142,7 +144,7 @@ function sheetOS(wb, D, mode) {
   ws.getCell('A6').value = 'M / V :'; ws.getCell('B6').value = D.vslFull;
   ws.getCell('G6').value = 'VOY. NO.:'; ws.getCell('H6').value = isIn ? D.voyD : D.voyL;
   ws.getCell('K6').value = 'DATE :'; ws.getCell('L6').value = d10(D.date);
-  ws.getCell('A8').value = 'PORT :'; ws.getCell('B8').value = 'PYEONGTAEK, KOREA';
+  ws.getCell('A8').value = 'PORT :'; ws.getCell('B8').value = CITY();
   ws.getCell('G8').value = 'PIER :'; ws.getCell('H8').value = D.pier;
   ws.getCell('K8').value = 'BERTH :'; ws.getCell('L8').value = D.berth;
   for (const a of ['A6','G6','K6','A8','G8','K8']) ws.getCell(a).font = HEAD_FONT;
@@ -192,7 +194,7 @@ function sheetDM(wb, D, mode) {
   ws.getCell('A6').value = 'M / V :'; ws.getCell('B6').value = D.vslFull;
   ws.getCell('G6').value = 'VOY. NO. :'; ws.getCell('H6').value = isIn ? D.voyD : D.voyL;
   ws.getCell('K6').value = 'DATE :'; ws.getCell('L6').value = d10(D.date);
-  ws.getCell('A8').value = 'PORT :'; ws.getCell('B8').value = 'PYEONGTAEK, KOREA';
+  ws.getCell('A8').value = 'PORT :'; ws.getCell('B8').value = CITY();
   ws.getCell('G8').value = 'PIER :'; ws.getCell('H8').value = D.pier;
   ws.getCell('K8').value = 'BERTH :'; ws.getCell('L8').value = D.berth;
   for (const a of ['A6','G6','K6','A8','G8','K8']) ws.getCell(a).font = HEAD_FONT;
@@ -211,7 +213,7 @@ function sheetSeal(wb, D) {
   head(ws);
   ws.getCell('A4').value = `M / V : ${D.vslFull}`; ws.getCell('F4').value = 'DATE :'; ws.getCell('G4').value = d10(D.date);
   ws.getCell('A6').value = `VOY.NO.: ${[D.voyD, D.voyL].filter(Boolean).join(' & ')}`;
-  ws.getCell('F6').value = 'PORT :'; ws.getCell('G6').value = 'PYEONGTAEK, KOREA';
+  ws.getCell('F6').value = 'PORT :'; ws.getCell('G6').value = CITY();
   for (const a of ['A4','F4','A6','F6']) ws.getCell(a).font = HEAD_FONT;
   ws.mergeCells('A8:H8'); ws.getCell('A8').value = 'ACTUAL CONTAINER & SEAL NUMBER';
   ws.getCell('A8').font = TITLE_FONT; ws.getCell('A8').alignment = { horizontal: 'center' };
@@ -242,7 +244,7 @@ function sheetRF(wb, D) {
   ws.getCell('A5').value = 'Discharging  /  Loading'; ws.getCell('A5').font = BODY_FONT;
   ws.getCell('A7').value = `M / V : ${D.vslFull}`; ws.getCell('D7').value = `VOY # : ${[D.voyD, D.voyL].filter(Boolean).join(' & ')}`;
   ws.getCell('G7').value = `DATE : ${d10(D.date)}`;
-  ws.getCell('A8').value = `PIER : ${D.pier}`; ws.getCell('D8').value = `BERTH : ${D.berth}`; ws.getCell('G8').value = 'PORT : PYEONGTAEK, KOREA';
+  ws.getCell('A8').value = `PIER : ${D.pier}`; ws.getCell('D8').value = `BERTH : ${D.berth}`; ws.getCell('G8').value = `PORT : ${CITY()}`;
   for (const a of ['A7','D7','G7','A8','D8','G8']) ws.getCell(a).font = HEAD_FONT;
   const hd = ['CONTAINER NO.', 'SEAL NO.', 'SIZE', 'LOCATION (Bay/Row/Tier)', 'Setting', 'Actual', 'TIME (Plug In/Out)', 'REMARKS'];
   hd.forEach((v, i) => { const c = ws.getRow(10).getCell(i + 1); c.value = v; c.font = HEAD_FONT; c.border = BOX; c.alignment = { horizontal: 'center' }; });
@@ -331,7 +333,7 @@ function sheetShifting(wb, D) {
   head(ws);
   ws.getCell('A3').value = 'SHIFTING REPORT'; ws.getCell('A3').font = TITLE_FONT;
   ws.getCell('A5').value = `M.V. : ${D.vslFull}`; ws.getCell('H5').value = `VOY # : ${[D.voyD, D.voyL].filter(Boolean).join(' & ')}`;
-  ws.getCell('A6').value = `DATE : ${d10(D.date)}`; ws.getCell('H6').value = 'PORT : PYEONGTAEK, KOREA';
+  ws.getCell('A6').value = `DATE : ${d10(D.date)}`; ws.getCell('H6').value = `PORT : ${CITY()}`;
   for (const a of ['A5','H5','A6','H6']) ws.getCell(a).font = HEAD_FONT;
   const hd = ['NO', "CON'T NO", 'TYPE', 'F/E', 'W/T', 'OPR', 'OLD POSN', 'NEW POSN', 'POD', 'POL', 'ACCOUNT'];
   hd.forEach((v, i) => { const c = ws.getRow(8).getCell(i + 1); c.value = v; c.font = HEAD_FONT; c.border = BOX; c.alignment = { horizontal: 'center' }; });
@@ -376,6 +378,32 @@ async function fillTemplate(D, ExcelJS) {
   }
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(ab);
+  // TallyUni 0.1: 템플릿에 박힌 회사명·주소를 테넌트 값으로 치환 —
+  //   NaN 스크럽과 같은 전 시트 전 셀 스캔. 기본 테넌트면 같은 값이라 결과 불변.
+  {
+    const _T = tenant();
+    const _SUB = { 'GREEN MARINE CO., LTD.': _T.companyEn, 'PYEONGTAEK, KOREA': _T.addressEn };
+    //   실물 템플릿엔 자간용 이중 공백 변형('GREEN  MARINE  CO.,  LTD.  ')이 섞여 있다(Final Work·SHIFTING 실측).
+    //   공백 런을 하나로 접어 비교해야 전 시트가 잡힌다.
+    const _key = (x) => String(x).replace(/\s+/g, ' ').trim();
+    wb.worksheets.forEach((ws0) => ws0.eachRow({ includeEmpty: true }, (row0) => row0.eachCell({ includeEmpty: true }, (c0) => {
+      const v0 = c0.value;
+      if (typeof v0 === 'string') {
+        const k0 = _key(v0);
+        const r0 = _SUB[k0];
+        //   테넌트 값이 정규화 결과와 같으면(=기본 테넌트) 원본 문자열을 건드리지 않는다 —
+        //   실물 양식의 자간 공백까지 그대로 보존(결과 완전 불변).
+        if (r0 !== undefined && r0 !== k0) c0.value = r0;
+      } else if (v0 && typeof v0 === 'object' && Array.isArray(v0.richText)) {
+        const flat = v0.richText.map((t0) => t0.text || '').join('');
+        const k0 = _key(flat);
+        const r0 = _SUB[k0];
+        if (r0 !== undefined && r0 !== k0) {
+          c0.value = { richText: [{ ...(v0.richText[0] || {}), text: r0 }] };
+        }
+      }
+    })));
+  }
   // exceljs 라운드트립 버그 방어 — 원본의 정의명(인쇄영역 등)이 깨진 채 남으면
   //   재저장본을 일부 뷰어가 못 연다. 정의명은 서식이 아니므로 비운다.
   try { wb.definedNames.model = []; } catch { /* skip */ }
@@ -1080,7 +1108,7 @@ function fillAllHeaders(wb, D, dstr) {
     if (kind === 'DATE') return dstr;
     if (kind === 'PIER') return D.pier;
     if (kind === 'BERTH') return D.berth;
-    if (kind === 'PORT') return 'PYEONGTAEK, KOREA';
+    if (kind === 'PORT') return CITY();
     return null;
   };
   const kindOf = (t) => {
@@ -1174,7 +1202,7 @@ export async function generateTallyExcel(D, opts = {}) {
   }
   if (!note) note = '이 배는 템플릿 미보유 — 표준 서식으로 생성(배치가 실물과 다를 수 있음)';
   const wb = new ExcelJS.Workbook();
-  wb.creator = 'GREEN MARINE Tallyman Master';
+  wb.creator = `${tenant().companyEn} Tallyman`;
   sheetFinalWork(wb, D);
   sheetTimeSheet(wb, D);
   sheetOS(wb, D, 'in');
