@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.2 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
+# 메일파일럿 Uni 0.3 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
 """실행: python mailpilot/tests/run_tests.py
 
   1) 판독 유닛테스트 — 실제 유형 제목 12종 → 선박/항차/코드 표
@@ -11,6 +11,12 @@
      UIDL 캐시 중복 0, DELE 호출 0, 연결 테스트(STAT+TOP)
   8) collect_days 경계(오래된 메일 스킵 + 캐시 기록) · UIDL 미지원 폴백 · TOP 미지원
   9) 설정 도우미(0.1 호환) · 프리셋 전환 시 GUI 자동값 · config protocol 저장/로드
+ 10) 검수 대상 체크 — 0.2 캐시 회귀 · 끈 선박은 _기타 적재 · 발견 기록/등록(tally)은 그대로
+ 11) 폴더 정리 — 체크 상태에 맞춰 왕복 이동, 충돌 항차는 건너뛰고 삭제·덮어쓰기 없음
+ 12) GUI — 수집 조건 문구(정본) · 체크 토글 즉시 저장 · 폴더 정리 확인창
+ 13) 폴더 정리 — 항차를 다 옮긴 빈 코드 폴더 치우기(파일 삭제 없음 · 멱등)
+ 14) GUI — 수집 중 [폴더 정리] 잠금 · --autostart 무인 시작(설정 불완전이면 시작 안 함)
+ 15) 버전 라벨 — README·run_mailpilot.bat 이 core.VERSION 과 같은지, --autostart 전달
 """
 
 import datetime
@@ -343,16 +349,27 @@ def _install_fake_tkinter():
     class FakeVar:
         def __init__(self, master=None, value=""):
             self._v = value
+            self._traces = []
 
         def get(self):
             return self._v
 
         def set(self, v):
             self._v = v
+            for fn in list(self._traces):             # trace_add("write", …) 대역
+                fn("var", "", "write")
+
+        def trace_add(self, mode, fn):
+            self._traces.append(fn)
+            return "trace#%d" % len(self._traces)
 
     class FakeWidget:
         def __init__(self, *args, **kwargs):
             self.kwargs = dict(kwargs)
+
+        def configure(self, **kwargs):
+            self.kwargs.update(kwargs)                # state/text 변경을 시험에서 읽을 수 있게 기억
+            return None
 
         def __getattr__(self, name):
             def _noop(*a, **k):
@@ -386,6 +403,7 @@ def _install_fake_tkinter():
     tk.IntVar = FakeVar
     tk.BooleanVar = FakeVar
     tk.Text = FakeText
+    tk.Canvas = FakeWidget
     for const in ("END", "W", "E", "N", "S", "BOTH", "X", "Y", "LEFT", "RIGHT",
                   "TOP", "BOTTOM", "DISABLED", "NORMAL"):
         setattr(tk, const, const.lower())
@@ -401,6 +419,7 @@ def _install_fake_tkinter():
     messagebox.showinfo = lambda *a, **k: None
     messagebox.showwarning = lambda *a, **k: None
     messagebox.showerror = lambda *a, **k: None
+    messagebox.askyesno = lambda *a, **k: False       # 시험 중에 폴더를 건드리지 않는다(기본 '아니오')
 
     tk.ttk, tk.filedialog, tk.messagebox = ttk, filedialog, messagebox
     sys.modules["tkinter"] = tk
@@ -815,6 +834,448 @@ def test_config_and_presets():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ────────────────────── 10) 0.3 — 검수 대상 체크 · _기타 적재 · 폴더 정리 ──────────────────────
+
+# 오늘 실제로 판독된 제목(코드 TAPN) — 게이트 시험용 픽스처
+S_TAPN = "XIN TAI PING V-0535E Container Discharging List (In Bound)"
+F_TAPN = ["XINTAIPING_0535E.edi"]
+
+
+class FakeFirebase:
+    """register_vessel/heartbeat/collect_log 호출을 잡아 두는 대역(네트워크 없음)."""
+
+    enabled = True
+
+    def __init__(self):
+        self.vessels = []
+        self.beats = []
+        self.logs = []
+
+    def register_vessel(self, code, name, last_mail_at=None, tally=None):
+        self.vessels.append({"code": code, "name": name, "at": last_mail_at, "tally": tally})
+        return {"ok": True}
+
+    def heartbeat(self, mails, files, skipped):
+        self.beats.append((mails, files, skipped))
+        return {"ok": True}
+
+    def write_collect_log(self, summary):
+        self.logs.append(summary)
+        return {"ok": True}
+
+
+def _tally_collector(tmp, root, tag, cache=None, firebase=None):
+    cfg = {"provider": "custom", "protocol": "imap", "host": "imap.test.local", "port": 993,
+           "ssl": True, "email": "u@test", "password": "pw", "mailbox_root": root,
+           "collect_days": 7, "poll_minutes": 10, "firebase": {}}
+    col = core.Collector(cfg, imap_factory=FakeIMAP, firebase=firebase,
+                         cache_path=os.path.join(tmp, "vessels_%s.json" % tag),
+                         log_dir=os.path.join(tmp, "logs"))
+    if firebase is None:
+        col.firebase = core.FirebaseREST({})
+    if cache is not None:
+        col.cache = cache
+    return col
+
+
+def test_tally_gate():
+    print("\n[10] 검수 대상 체크 — 기본 회귀 · _기타 게이트")
+    # S1) tally 키가 아예 없는 0.2 캐시 → 0.2 와 똑같이 {코드}/{항차} 로 적재
+    check("tally 기록 없으면 기본 True(검수 대상)",
+          core.tally_enabled({"names": {}, "codes": {}}, "TAPN") is True)
+    tmp = tempfile.mkdtemp(prefix="mailpilot_tally_")
+    try:
+        FakeIMAP.MESSAGES = [build_eml(S_TAPN, F_TAPN)]
+        root1 = os.path.join(tmp, "MB_BASE")
+        legacy = {"names": {}, "codes": {}}                # 0.2 캐시(그대로)
+        col1 = _tally_collector(tmp, root1, "base", cache=legacy)
+        s1 = col1.run_cycle()
+        base_path = os.path.join(root1, "TAPN", "0535E", "XINTAIPING_0535E.edi")
+        check("S1 회귀 — 0.2 캐시(tally 없음)는 {코드}/{항차} 그대로",
+              os.path.exists(base_path) and s1["files"] == 1
+              and not os.path.exists(os.path.join(root1, core.OTHER_DIR)),
+              os.path.relpath(base_path, root1).replace("\\", "/"))
+
+        # S2) 체크를 끄면 _기타/{코드}/{항차} 로 — 발견 기록·파이어베이스 등록은 그대로
+        FakeIMAP.MESSAGES = [build_eml(S_TAPN, F_TAPN)]
+        root2 = os.path.join(tmp, "MB_OFF")
+        cache = {"names": {"TAI PING": "TAPN"}, "codes": {"TAPN": "TAI PING"}}
+        core.set_tally(cache, "TAPN", False)
+        fake_fb = FakeFirebase()
+        col2 = _tally_collector(tmp, root2, "off", cache=cache, firebase=fake_fb)
+        s2 = col2.run_cycle()
+        off_path = os.path.join(root2, core.OTHER_DIR, "TAPN", "0535E", "XINTAIPING_0535E.edi")
+        check("S2 게이트 — 체크 끈 선박은 _기타/{코드}/{항차} 로 적재",
+              os.path.exists(off_path) and not os.path.exists(os.path.join(root2, "TAPN")),
+              os.path.relpath(off_path, root2).replace("\\", "/"))
+        check("S2 — 미분류로 새지 않는다(파일 1건 저장·미분류 0)",
+              s2["files"] == 1 and s2["unclassified"] == 0,
+              "저장 %d · 미분류 %d" % (s2["files"], s2["unclassified"]))
+        check("S2 — 발견 기록(summary.vessels)은 체크와 무관하게 남는다",
+              s2["vessels"] == [{"code": "TAPN", "name": "TAI PING", "voyage": "0535E"}],
+              json.dumps(s2["vessels"], ensure_ascii=False))
+        check("S2 — register_vessel 이 tally=False 로 호출된다",
+              len(fake_fb.vessels) == 1 and fake_fb.vessels[0]["code"] == "TAPN"
+              and fake_fb.vessels[0]["tally"] is False,
+              json.dumps(fake_fb.vessels, ensure_ascii=False))
+
+        # 다시 켜면 원래 자리로
+        FakeIMAP.MESSAGES = [build_eml(S_TAPN, F_TAPN)]
+        root3 = os.path.join(tmp, "MB_ON")
+        core.set_tally(cache, "TAPN", True)
+        fb2 = FakeFirebase()
+        col3 = _tally_collector(tmp, root3, "on", cache=cache, firebase=fb2)
+        col3.run_cycle()
+        check("체크를 다시 켜면 {코드}/{항차} 로 복귀 · tally=True 등록",
+              os.path.exists(os.path.join(root3, "TAPN", "0535E", "XINTAIPING_0535E.edi"))
+              and fb2.vessels[0]["tally"] is True)
+
+        # register_vessel 하위호환 — tally 를 안 주면 payload 에 넣지 않는다
+        calls = []
+        original = core.http_request
+
+        def fake_http(url, method="GET", payload=None, timeout=core.HTTP_TIMEOUT):
+            calls.append({"url": url, "method": method, "payload": payload})
+            if "identitytoolkit" in url:
+                return {"idToken": "T", "expiresIn": "3600"}
+            return None if method == "GET" else {"ok": True}
+
+        core.http_request = fake_http
+        try:
+            fb3 = core.FirebaseREST({"apiKey": "K", "databaseURL": "https://d.firebaseio.com"})
+            fb3.register_vessel("TAPN", "TAI PING")                    # 0.2 호출 방식
+            fb3.register_vessel("SWSP", "SAWASDEE SPICA", None, False)  # 위치 인자로도 받는다
+        finally:
+            core.http_request = original
+        patches = [c for c in calls if c["method"] == "PATCH"]
+        check("register_vessel 하위호환 — tally 미지정이면 payload 에 없음",
+              "tally" not in patches[0]["payload"] and patches[1]["payload"]["tally"] is False,
+              json.dumps([p["payload"] for p in patches], ensure_ascii=False))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 11) 폴더 정리(왕복 이동 · 충돌 보존) ──────────────────────
+
+def _touch(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("x")
+
+
+def _all_files(root):
+    return sorted(os.path.relpath(os.path.join(b, f), root).replace("\\", "/")
+                  for b, _d, files in os.walk(root) for f in files)
+
+
+def test_organize_folders():
+    print("\n[11] 폴더 정리 — 체크 상태에 맞춰 왕복(삭제·덮어쓰기 없음)")
+    tmp = tempfile.mkdtemp(prefix="mailpilot_org_")
+    root = os.path.join(tmp, "MAILBOX")
+    try:
+        _touch(os.path.join(root, "TAPN", "0535E", "a.txt"))
+        _touch(os.path.join(root, "TAPN", "0536E", "a2.txt"))
+        _touch(os.path.join(root, "SWS2", "2606N", "b.txt"))
+        _touch(os.path.join(root, core.OTHER_DIR, "DJCT", "0221E", "c.txt"))
+        _touch(os.path.join(root, core.OTHER_DIR, "TAPN", "0535E", "old.txt"))  # 충돌 유발
+        os.makedirs(os.path.join(root, core.UNCLASSIFIED_DIR, "x"), exist_ok=True)
+        os.makedirs(os.path.join(root, "UNKNOWN"), exist_ok=True)
+        before = _all_files(root)
+
+        cache = {"names": {"TAI PING": "TAPN", "SAWASDEE SPICA": "SWS2",
+                           "DONGJIN CITY": "DJCT"},
+                 "codes": {"TAPN": "TAI PING", "SWS2": "SAWASDEE SPICA",
+                           "DJCT": "DONGJIN CITY"},
+                 "tally": {"TAPN": False, "DJCT": True}}
+        moved, skipped = core.organize_folders(root, cache)
+        after = _all_files(root)
+        print("    이동: %s" % [(os.path.relpath(s, root).replace("\\", "/"),
+                                 os.path.relpath(d, root).replace("\\", "/"))
+                                for s, d in moved])
+        print("    건너뜀: %s" % [os.path.relpath(s, root).replace("\\", "/")
+                                  for s, _d in skipped])
+        print("    정리 후 파일: %s" % after)
+
+        check("체크 끈 선박(TAPN) 항차가 _기타 로 이동",
+              os.path.exists(os.path.join(root, core.OTHER_DIR, "TAPN", "0536E", "a2.txt")))
+        check("_기타 의 체크 켠 선박(DJCT)이 루트로 복귀",
+              os.path.exists(os.path.join(root, "DJCT", "0221E", "c.txt"))
+              and not os.path.exists(os.path.join(root, core.OTHER_DIR, "DJCT")))
+        check("충돌 항차는 건너뛰고 양쪽 원본 보존(덮어쓰기 없음)",
+              len(skipped) == 1
+              and os.path.exists(os.path.join(root, "TAPN", "0535E", "a.txt"))
+              and os.path.exists(os.path.join(root, core.OTHER_DIR, "TAPN", "0535E", "old.txt")),
+              "건너뜀 %d건" % len(skipped))
+        check("체크 기록 없는 선박(SWS2)은 무접촉",
+              os.path.exists(os.path.join(root, "SWS2", "2606N", "b.txt")))
+        check("_미분류·모르는 폴더는 무접촉",
+              os.path.isdir(os.path.join(root, core.UNCLASSIFIED_DIR, "x"))
+              and os.path.isdir(os.path.join(root, "UNKNOWN")))
+        check("파일은 하나도 지워지지 않는다(개수 동일)",
+              len(before) == len(after) == 5, "정리 전 %d · 후 %d" % (len(before), len(after)))
+        check("이동 2건(TAPN/0536E · _기타/DJCT)", len(moved) == 2, "%d건" % len(moved))
+
+        # 두 번 눌러도 안전(멱등) — 남은 것은 충돌 항차뿐
+        moved2, skipped2 = core.organize_folders(root, cache)
+        check("한 번 더 눌러도 안전(추가 이동 없음 · 파일 그대로)",
+              moved2 == [] and len(skipped2) == 1 and _all_files(root) == after,
+              "이동 %d · 건너뜀 %d" % (len(moved2), len(skipped2)))
+        check("메일박스 폴더가 없으면 조용히 죽지 않고 빈 결과",
+              core.organize_folders(os.path.join(tmp, "없는폴더"), cache) == ([], []))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 12) GUI — 조건 문구 · 체크 토글 ──────────────────────
+
+class _StubCollector:
+    """수집 중 토글 시 캐시가 갈렸을 때의 안전장치를 확인하기 위한 대역."""
+
+    def __init__(self, cache):
+        self.cache = cache
+        self.running = True
+
+
+def test_gui_tally():
+    print("\n[12] GUI — 수집 조건 문구 · 선박 체크 토글")
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        _install_fake_tkinter()
+    tmp = tempfile.mkdtemp(prefix="mailpilot_gui_tally_")
+    cfg_path = os.path.join(tmp, "config.json")
+    cache_path = os.path.join(tmp, "vessels_cache.json")
+    try:
+        core.save_cache({"names": {"TAI PING": "TAPN", "SAWASDEE SPICA": "SWSP"},
+                         "codes": {"TAPN": "TAI PING", "SWSP": "SAWASDEE SPICA"}},
+                        cache_path)
+        import gui
+        app = gui.MailPilotGUI(config_path=cfg_path, cache_path=cache_path)
+
+        app.var_days.set("3")
+        app.var_poll.set("15")
+        want = ("지금 조건: 최근 3일 · 15분 주기 · 첨부(EDI·ASC·TXT·XLS·XLSX·PDF) 있는 메일만 · "
+                "판독 실패는 _미분류 보존 · 서버 원본은 지우지 않습니다.")
+        check("수집 조건 문구(정본)", app.condition_text() == want, app.condition_text())
+        check("최근 며칠·주기를 고치면 화면 문구가 바로 따라온다",
+              app.var_condition.get() == want, app.var_condition.get()[:40])
+
+        check("발견된 선박이 코드순으로 체크박스로 뜬다",
+              sorted(app.tally_vars) == ["SWSP", "TAPN"], ", ".join(sorted(app.tally_vars)))
+        check("처음엔 전부 체크(기본 = 검수 대상)",
+              all(v.get() for v in app.tally_vars.values()))
+
+        app.tally_vars["TAPN"].set(False)
+        app.on_toggle_tally("TAPN")
+        saved = core.load_cache(cache_path)
+        check("체크 끄면 캐시에 즉시 저장(tally False)",
+              saved.get("tally", {}).get("TAPN") is False
+              and core.tally_enabled(saved, "SWSP") is True,
+              json.dumps(saved.get("tally", {}), ensure_ascii=False))
+        check("끈 선박은 게이트에서도 _기타 행",
+              core.tally_enabled(app.cache, "TAPN") is False)
+
+        stub_cache = {"names": {}, "codes": {}}
+        app.collector = _StubCollector(stub_cache)
+        app.tally_vars["SWSP"].set(False)
+        app.on_toggle_tally("SWSP")
+        check("수집 중 토글해도 Collector 캐시에 반영",
+              core.tally_enabled(stub_cache, "SWSP") is False)
+        app.collector = None
+
+        app.on_refresh_vessels()
+        check("새로고침해도 캐시 딕셔너리는 같은 객체(공유 유지)",
+              app.cache is not None and core.tally_enabled(app.cache, "TAPN") is False
+              and sorted(app.tally_vars) == ["SWSP", "TAPN"])
+
+        check("확인창 문구에 어디로 가는지 적혀 있다",
+              "_기타" in app.organize_message() and "TAPN" in app.organize_message()
+              and "지우거나 덮어쓰지 않습니다" in app.organize_message(),
+              app.organize_message().splitlines()[0])
+
+        app.var_root.set(os.path.join(tmp, "MB"))
+        os.makedirs(os.path.join(tmp, "MB", "TAPN", "0535E"), exist_ok=True)
+        check("확인창에서 '아니오'면 아무것도 옮기지 않는다",
+              app.on_organize() is None
+              and os.path.isdir(os.path.join(tmp, "MB", "TAPN", "0535E")))
+
+        import tkinter.messagebox as mbox
+        yes_before = mbox.askyesno
+        mbox.askyesno = lambda *a, **k: True
+        try:
+            thread = app.on_organize()
+            if thread is not None and hasattr(thread, "join"):
+                thread.join(10)
+        finally:
+            mbox.askyesno = yes_before
+        check("'예'를 누르면 실제로 _기타 로 옮긴다",
+              os.path.isdir(os.path.join(tmp, "MB", core.OTHER_DIR, "TAPN", "0535E")),
+              ", ".join(sorted(os.listdir(os.path.join(tmp, "MB")))))
+    except Exception as exc:
+        check("GUI 체크리스트", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _widget_state(widget):
+    """가짜 위젯은 configure 로 받은 값을, 진짜 tkinter 위젯은 cget 으로 읽는다."""
+    kwargs = getattr(widget, "kwargs", None)
+    if isinstance(kwargs, dict) and "state" in kwargs:
+        return str(kwargs["state"])
+    try:
+        return str(widget.cget("state"))
+    except Exception:
+        return None
+
+
+# ────────────────────── 13) 폴더 정리 — 껍데기만 남은 폴더 치우기 ──────────────────────
+
+def test_organize_empty_cleanup():
+    print("\n[13] 폴더 정리 — 항차를 다 옮긴 빈 폴더는 치운다(파일은 하나도 안 지운다)")
+    tmp = tempfile.mkdtemp(prefix="mailpilot_org2_")
+    root = os.path.join(tmp, "MAILBOX")
+    try:
+        # 대상 자리에 같은 코드 폴더가 이미 있어야 '항차 단위 이동' 경로를 탄다
+        _touch(os.path.join(root, "HTPN", "0101E", "a.txt"))
+        _touch(os.path.join(root, core.OTHER_DIR, "HTPN", "0202E", "b.txt"))
+        # 충돌로 항차가 남는 쪽 — 폴더가 그대로 있어야 한다
+        _touch(os.path.join(root, "KEEP", "0303E", "c.txt"))
+        _touch(os.path.join(root, core.OTHER_DIR, "KEEP", "0303E", "old.txt"))
+        before = _all_files(root)
+
+        cache = {"codes": {"HTPN": "HAI TAI PING", "KEEP": "KEEP SHIP"},
+                 "tally": {"HTPN": False, "KEEP": False}}
+        moved, skipped = core.organize_folders(root, cache)
+        after = _all_files(root)
+        print("    정리 후 파일: %s" % after)
+
+        check("항차를 다 옮긴 코드 폴더는 사라진다(빈 폴더만 rmdir)",
+              not os.path.exists(os.path.join(root, "HTPN")),
+              ", ".join(sorted(os.listdir(root))))
+        check("옮긴 항차는 _기타 밑에 그대로 있다",
+              os.path.exists(os.path.join(root, core.OTHER_DIR, "HTPN", "0101E", "a.txt"))
+              and os.path.exists(os.path.join(root, core.OTHER_DIR, "HTPN", "0202E", "b.txt")))
+        check("충돌로 항차가 남은 폴더는 지우지 않는다",
+              os.path.isdir(os.path.join(root, "KEEP", "0303E"))
+              and len(skipped) == 1, "건너뜀 %d건" % len(skipped))
+        check("빈 폴더를 치워도 파일 개수는 그대로",
+              len(before) == len(after) == 4, "정리 전 %d · 후 %d" % (len(before), len(after)))
+        check("이동 1건(HTPN/0101E)", len(moved) == 1, "%d건" % len(moved))
+
+        moved2, skipped2 = core.organize_folders(root, cache)
+        check("한 번 더 눌러도 안전(추가 이동 없음 · 파일 그대로)",
+              moved2 == [] and len(skipped2) == 1 and _all_files(root) == after,
+              "이동 %d · 건너뜀 %d" % (len(moved2), len(skipped2)))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 14) GUI — 수집 중 잠금 · 무인 자동 시작 ──────────────────────
+
+def test_gui_lock_and_autostart():
+    print("\n[14] GUI — 수집 중 [폴더 정리] 잠금 · --autostart 무인 시작")
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        _install_fake_tkinter()
+    tmp = tempfile.mkdtemp(prefix="mailpilot_auto_")
+    cfg_path = os.path.join(tmp, "config.json")
+    cache_path = os.path.join(tmp, "vessels_cache.json")
+    try:
+        import gui
+        app = gui.MailPilotGUI(config_path=cfg_path, cache_path=cache_path)
+
+        # ① 수집 중 [폴더 정리] 잠금
+        check("[폴더 정리] 버튼을 잡고 있다(상태를 바꿀 수 있다)",
+              getattr(app, "btn_organize", None) is not None)
+        app._set_running_ui(True)
+        check("수집을 시작하면 [폴더 정리]가 잠긴다",
+              _widget_state(app.btn_organize) == "disabled", str(_widget_state(app.btn_organize)))
+        check("수집 중에는 버튼 글자가 '수집 중지'",
+              app.btn_run.kwargs.get("text", "수집 중지") == "수집 중지")
+        app._set_running_ui(False)
+        check("수집을 멈추면 [폴더 정리]가 풀린다",
+              _widget_state(app.btn_organize) == "normal", str(_widget_state(app.btn_organize)))
+
+        # ② 설정이 모자라면 자동 시작하지 않는다
+        check("설정이 비면 자동 시작하지 않는다(로그만 남긴다)",
+              app.request_autostart() is False, ", ".join(app.missing_fields()) or "(없음)")
+
+        # ③ 설정이 갖춰지면 mainloop 진입 후로 예약한다
+        app.var_email.set("me@example.com")
+        app.var_password.set("pw")
+        app.var_root.set(tmp)
+        check("이메일·비밀번호·메일박스가 다 차면 빠진 항목 없음", app.missing_fields() == [])
+        scheduled = []
+
+        def _fake_after(ms, fn=None, *a):
+            scheduled.append((ms, fn))
+            return "after#auto"
+
+        app.master.after = _fake_after
+        ok_sched = app.request_autostart(delay_ms=123)
+        check("설정이 갖춰지면 창이 뜬 뒤로 자동 시작을 예약한다",
+              ok_sched is True and len(scheduled) == 1 and scheduled[0][0] == 123
+              and scheduled[0][1] == app._autostart_now,
+              "예약 %d건" % len(scheduled))
+
+        # ④ 예약된 콜백은 on_toggle_run 을 그대로 쓴다(진짜 수집기는 띄우지 않는다)
+        calls = []
+        app.on_toggle_run = lambda: calls.append("run")
+        check("예약 콜백이 수집 시작(on_toggle_run)을 부른다",
+              app._autostart_now() is True and calls == ["run"], "호출 %d회" % len(calls))
+        app.collector = _StubCollector({"names": {}, "codes": {}})
+        check("이미 수집 중이면 두 번 시작하지 않는다",
+              app._autostart_now() is False and calls == ["run"], "호출 %d회" % len(calls))
+        app.collector = None
+
+        # ⑤ 무인 저장 — 확인창이 뜨면 재시작이 멈춘다
+        import tkinter.messagebox as mbox
+        shown = []
+        info_before = mbox.showinfo
+        mbox.showinfo = lambda *a, **k: shown.append(a)
+        try:
+            quiet = app.on_save(announce=False)
+            loud = app.on_save()
+        finally:
+            mbox.showinfo = info_before
+        check("무인 저장은 확인창을 띄우지 않는다(사람 손 없이 재시작)",
+              quiet is not None and loud is not None and len(shown) == 1,
+              "확인창 %d회" % len(shown))
+        check("무인 저장도 config.json 은 남긴다",
+              os.path.exists(cfg_path)
+              and core.load_config(cfg_path)["email"] == "me@example.com")
+    except Exception as exc:
+        check("GUI 잠금·자동 시작", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 15) 버전 라벨 · 실행 배치 ──────────────────────
+
+def test_version_labels():
+    print("\n[15] 버전 라벨 · run_mailpilot.bat")
+    version = core.VERSION.split()[-1]
+    bat_path = os.path.join(PKG, "run_mailpilot.bat")
+    readme_path = os.path.join(PKG, "README.md")
+    try:
+        with open(bat_path, "r", encoding="utf-8", errors="replace") as fh:
+            bat = fh.read()
+        with open(readme_path, "r", encoding="utf-8") as fh:
+            readme = fh.read()
+    except OSError as exc:
+        check("버전 라벨 파일 읽기", False, str(exc))
+        return
+    check("run_mailpilot.bat 이 gui 에 --autostart 를 넘긴다",
+          "--autostart" in bat and "gui.py" in bat)
+    check("run_mailpilot.bat 머리글 버전 = %s" % version,
+          ("MailPilot Uni %s" % version) in bat)
+    check("README 머리글 버전 = %s" % version,
+          ("# 메일파일럿 Uni %s" % version) in readme)
+    check("README·bat 에 옛 버전(0.2) 표기가 남아 있지 않다",
+          "0.2" not in readme and "0.2" not in bat)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -829,6 +1290,12 @@ def main():
     test_pop3_cycle()
     test_pop3_edges()
     test_config_and_presets()
+    test_tally_gate()
+    test_organize_folders()
+    test_gui_tally()
+    test_organize_empty_cleanup()
+    test_gui_lock_and_autostart()
+    test_version_labels()
 
     failed = [name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

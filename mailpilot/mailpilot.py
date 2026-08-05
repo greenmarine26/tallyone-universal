@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.2 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 자동 판독 → 폴더 적재 → 파이어베이스 등록)
+# 메일파일럿 Uni 0.3 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 자동 판독 → 폴더 적재 → 파이어베이스 등록)
 # ⚠ 보안: config.json 에 메일 비밀번호가 평문으로 저장된다. 개인 PC 전용이며 공용 PC에서 쓰지 않는다.
 #   (MVP 한계 — 다음 판에서 암호화 예정. config.json 은 절대 커밋하지 않는다.)
 """메일파일럿 Uni — 사전(선박 목록) 없이 메일에서 선박·항차를 스스로 읽어내는 범용 수집기.
@@ -15,6 +15,7 @@
      그 앞의 영문 대문자 낱말에서 선박명을 뽑아 4자 선박코드를 만든다
   4) {mailbox_root}/{선박코드}/{항차}/{첨부파일명} 으로 적재
      판독 실패 메일은 {mailbox_root}/_미분류/{날짜}_{제목요약}/ 로 — 절대 버리지 않는다
+     검수 대상 체크를 끈 선박은 {mailbox_root}/_기타/{선박코드}/{항차}/ 로 — 발견 기록은 그대로 남는다
   5) 파이어베이스(익명 인증 REST)에 vessels/{코드}, collector_heartbeat, collect_log 기록
 
 IMAP 과 POP3 는 '메일을 가져오는 방법'만 다르다. 판독·적재·등록은 완전히 같은 함수를 쓴다.
@@ -38,7 +39,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-VERSION = "MailPilot Uni 0.2"
+VERSION = "MailPilot Uni 0.3"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -50,6 +51,7 @@ HTTP_TIMEOUT = 15          # 초 — 모든 네트워크 요청 공통(조용한
 IMAP_TIMEOUT = 30          # 초
 POP3_TIMEOUT = 30          # 초
 UNCLASSIFIED_DIR = "_미분류"
+OTHER_DIR = "_기타"         # 검수 대상 체크를 끈 선박의 적재 위치(발견 기록은 그대로 남긴다)
 MAX_VESSEL_WORDS = 2       # 선박명으로 인정하는 낱말 수 상한(설계 확정치)
 COLLECT_LOG_KEEP = 50      # collect_log 롤링 보존 건수
 
@@ -299,6 +301,28 @@ def save_cache(cache, path=None):
         log("선박 캐시 저장 실패: %s" % exc)
 
 
+# ── 검수 대상 체크(캐시 안 "tally" 칸) ──
+# 캐시 구조: {"names": {선박명: 코드}, "codes": {코드: 선박명}, "tally": {코드: true/false}}
+# 없는 코드는 True(검수 대상)로 본다 — 0.2 캐시를 그대로 읽어도 동작이 바뀌지 않는다.
+
+def tally_enabled(cache, code):
+    """이 선박이 검수 대상인가. 기록이 없으면 True(기본 = 받는다)."""
+    if not code:
+        return True
+    table = (cache or {}).get("tally") or {}
+    if code not in table:
+        return True
+    return bool(table[code])
+
+
+def set_tally(cache, code, on):
+    """검수 대상 체크를 켜고 끈다(캐시 딕셔너리를 그 자리에서 고친다)."""
+    if cache is None or not code:
+        return None
+    cache.setdefault("tally", {})[code] = bool(on)
+    return cache["tally"][code]
+
+
 def load_uidl_cache(path=None):
     """POP3 로 이미 받아 본 메일의 UIDL 목록(계정별). 없으면 빈 캐시."""
     path = path or UIDL_CACHE_PATH
@@ -539,6 +563,88 @@ def unclassified_dirname(subject, when=None):
     return "%s_%s" % (stamp, summary)
 
 
+# ──────────────────────────── 폴더 정리(체크 상태에 맞춰 왕복) ────────────────────────────
+#
+# 원칙 — 파일은 옮기기만 한다. 파일을 지우지도, 덮어쓰지도 않는다.
+#        (항차를 다 옮겨 껍데기만 남은 '빈' 코드 폴더는 os.rmdir 로 치운다 — 파일이 있으면 실패해 그대로 남는다.)
+#   · 체크 끈 선박 폴더  : {root}/{코드}      → {root}/_기타/{코드}
+#   · 체크 켠 선박 폴더  : {root}/_기타/{코드} → {root}/{코드}
+#   · 대상 자리에 같은 이름의 폴더가 이미 있으면 통째로 옮기지 않고 항차 폴더 단위로 옮긴다.
+#     그래도 같은 항차 폴더가 양쪽에 있으면 그 항차는 손대지 않고 건너뛴다(skipped).
+#   · 코드 사전에 없는 폴더·_미분류 는 아예 건드리지 않는다.
+
+def _move_tree(src, dst, moved, skipped, log_dir=None):
+    """폴더 하나를 옮긴다. 충돌하면 한 단계 내려가 항차 폴더 단위로 다시 시도한다."""
+    if not os.path.isdir(src):
+        return
+    if not os.path.exists(dst):
+        parent = os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        os.rename(src, dst)
+        moved.append((src, dst))
+        log("폴더 정리 — 옮김: %s → %s" % (src, dst), log_dir)
+        return
+
+    # 대상이 이미 있다 → 항차 폴더 단위로 내려가서 같은 규칙을 반복
+    for name in sorted(os.listdir(src)):
+        sub_src = os.path.join(src, name)
+        sub_dst = os.path.join(dst, name)
+        if os.path.exists(sub_dst):
+            skipped.append((sub_src, sub_dst))
+            log("폴더 정리 — 같은 이름이 이미 있어 건너뜀(그대로 둡니다): %s" % sub_dst, log_dir)
+            continue
+        os.rename(sub_src, sub_dst)
+        moved.append((sub_src, sub_dst))
+        log("폴더 정리 — 옮김: %s → %s" % (sub_src, sub_dst), log_dir)
+    if os.path.isdir(src) and not os.listdir(src):
+        # 항차를 다 옮겨 껍데기만 남은 코드 폴더는 치운다.
+        # os.rmdir 은 '빈 폴더'만 지운다 — 파일이 하나라도 있으면 OSError 로 실패하고 그대로 남는다.
+        try:
+            os.rmdir(src)
+            log("폴더 정리 — 빈 폴더를 치웠습니다: %s" % src, log_dir)
+        except OSError as exc:
+            log("폴더 정리 — 빈 폴더를 치우지 못해 그대로 둡니다: %s (%s)" % (src, exc), log_dir)
+
+
+def organize_folders(root, cache, log_dir=None):
+    """지금 체크 상태에 맞춰 기존 폴더를 왕복 이동. (moved, skipped) 각각 (원본, 대상) 목록."""
+    moved, skipped = [], []
+    if not root or not os.path.isdir(root):
+        log("폴더 정리 — 메일박스 폴더가 없습니다: %s" % root, log_dir)
+        return moved, skipped
+    codes = (cache or {}).get("codes") or {}
+    other_root = os.path.join(root, OTHER_DIR)
+
+    # ① 루트에 있는 '체크 꺼진' 선박 → _기타 안으로
+    for name in sorted(os.listdir(root)):
+        src = os.path.join(root, name)
+        if not os.path.isdir(src):
+            continue
+        if name.startswith("_"):                      # _기타·_미분류 등 살림 폴더는 무접촉
+            continue
+        if name not in codes:                         # 모르는 폴더는 무접촉
+            continue
+        if tally_enabled(cache, name):
+            continue
+        _move_tree(src, os.path.join(other_root, name), moved, skipped, log_dir)
+
+    # ② _기타 안에 있는 '체크 켜진' 선박 → 루트로 복귀
+    if os.path.isdir(other_root):
+        for name in sorted(os.listdir(other_root)):
+            src = os.path.join(other_root, name)
+            if not os.path.isdir(src):
+                continue
+            if name not in codes:
+                continue
+            if not tally_enabled(cache, name):
+                continue
+            _move_tree(src, os.path.join(root, name), moved, skipped, log_dir)
+
+    log("폴더 정리 완료 — 이동 %d건 · 건너뜀 %d건" % (len(moved), len(skipped)), log_dir)
+    return moved, skipped
+
+
 # ──────────────────────────── 메일 해석 ────────────────────────────
 
 def decode_header_text(value):
@@ -699,10 +805,15 @@ class FirebaseREST:
 
     # ── 수집기가 쓰는 3가지 기록 ──
 
-    def register_vessel(self, code, name, last_mail_at=None):
-        """vessels/{코드} — 빈 깡통 채우기(update 식 PATCH, 기존 값 보존)."""
+    def register_vessel(self, code, name, last_mail_at=None, tally=None):
+        """vessels/{코드} — 빈 깡통 채우기(update 식 PATCH, 기존 값 보존).
+
+        tally 는 검수 대상 체크 상태. None 이면 아예 보내지 않는다(서버 값 보존).
+        """
         now = _now_iso()
         body = {"name": name, "code": code, "lastMailAt": last_mail_at or now}
+        if tally is not None:
+            body["tally"] = bool(tally)
         existing = self.get("vessels/%s" % code)
         if not existing:
             body["discoveredAt"] = now
@@ -1043,10 +1154,16 @@ class Collector:
         names = [n for n, _ in attachments]
         target = read_mail_target(subject, names, self.cache)
         if target["ok"]:
-            subdirs = [target["code"], target["voyage"]]
-            log("판독: %s → 선박 %s(%s) · 항차 %s [%s]"
-                % (subject, target["vessel"], target["code"], target["voyage"], target["source"]),
-                self.log_dir)
+            if tally_enabled(self.cache, target["code"]):
+                subdirs = [target["code"], target["voyage"]]
+                log("판독: %s → 선박 %s(%s) · 항차 %s [%s]"
+                    % (subject, target["vessel"], target["code"], target["voyage"],
+                       target["source"]), self.log_dir)
+            else:
+                # 검수 대상 체크가 꺼진 선박 — 버리지 않고 _기타 로 모은다(발견 기록은 그대로)
+                subdirs = [OTHER_DIR, target["code"], target["voyage"]]
+                log("대상 아님 — _기타 적재: %s %s (%s)"
+                    % (target["code"], target["voyage"], subject), self.log_dir)
         else:
             subdirs = [UNCLASSIFIED_DIR, unclassified_dirname(subject, when)]
             summary["unclassified"] += 1
@@ -1078,7 +1195,8 @@ class Collector:
             log("파이어베이스 미설정 — 등록 단계를 건너뜁니다.", self.log_dir)
             return
         for entry in summary["vessels"]:
-            fb.register_vessel(entry["code"], entry["name"], summary["at"])
+            fb.register_vessel(entry["code"], entry["name"], summary["at"],
+                               tally=tally_enabled(self.cache, entry["code"]))
         fb.heartbeat(summary["mails"], summary["files"], summary["skipped"])
         fb.write_collect_log({
             "at": summary["at"], "mails": summary["mails"], "files": summary["files"],

@@ -1,5 +1,5 @@
 @echo off
-REM MailPilot Uni 0.2 - launcher (finds python, runs the setup GUI)
+REM MailPilot Uni 0.3 - launcher (finds python, runs the setup GUI, auto-starts collection)
 setlocal
 cd /d "%~dp0"
 set PY=
@@ -15,7 +15,7 @@ if not defined PY (
   exit /b 1
 )
 echo [MailPilot] starting with: %PY%
-%PY% "%~dp0gui.py"
+%PY% "%~dp0gui.py" --autostart %*
 if errorlevel 1 (
   echo.
   echo [MailPilot] exited with an error. See mailpilot\logs\ for details.
