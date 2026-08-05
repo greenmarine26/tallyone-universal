@@ -1,0 +1,20 @@
+{
+  "_주의": "이 파일을 config.json 으로 복사해서 쓰십시오. 비밀번호가 평문으로 저장되므로 개인 PC 전용입니다(공용 PC 금지).",
+  "provider": "naver",
+  "imap_host": "imap.naver.com",
+  "imap_port": 993,
+  "email": "your-id@naver.com",
+  "password": "메일 비밀번호 또는 앱 비밀번호",
+  "mailbox_root": "C:\\MAILBOX",
+  "collect_days": 7,
+  "poll_minutes": 10,
+  "firebase": {
+    "apiKey": "AIza...앱에 넣은 것과 같은 값",
+    "authDomain": "your-project.firebaseapp.com",
+    "databaseURL": "https://your-project-default-rtdb.firebaseio.com",
+    "projectId": "your-project",
+    "storageBucket": "your-project.appspot.com",
+    "messagingSenderId": "000000000000",
+    "appId": "1:000000000000:web:xxxxxxxx"
+  }
+}
