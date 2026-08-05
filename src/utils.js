@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.3';   // 3판 — 익명인증(보안 규칙 auth!=null 대응)
+export const APP_VERSION = 'TallyUni 0.3-01';   // 마법사 소유자가 수석 화면에 못 들어가던 것 — 소유자 무조건 수석 + 서버 role 배선 수리
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가

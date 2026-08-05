@@ -927,7 +927,11 @@ export async function fbDeleteStaff(name) {
 }
 export function fbSubscribeStaffList(callback) {
   const r = ref(db, 'staffList');
-  const unsub = onValue(r, (snap) => callback(snap.val() || {}));
+  // TallyUni 0.3-01: 조용히 실패 금지 — 이 구독이 죽으면 직책(role)이 앱에 영영 안 들어와
+  //   수석 판정(isChief)이 코드 명단 폴백에만 의존하게 된다(마법사 테넌트는 폴백이 비어 있다).
+  //   종전엔 오류 콜백이 없어 permission_denied가 나도 화면·콘솔 어디에도 흔적이 없었다.
+  const unsub = onValue(r, (snap) => callback(snap.val() || {}),
+    (err) => console.error('[staffList] 구독 실패 — 직책·수석 판정이 갱신되지 않습니다:', err && err.message ? err.message : err));
   return unsub;
 }
 
