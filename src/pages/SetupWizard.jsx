@@ -7,6 +7,8 @@
 //   이미 다른 기기가 마법사를 마친 회사면 2·3단계를 다시 받을 이유가 없다(회사명·모항·로고를 또 입력하면
 //   기기마다 값이 어긋난다). 있으면 DB의 settings를 그대로 tenantCfg로 받아 저장하고 바로 시작한다.
 //   이 경로에서는 staffList를 건드리지 않는다 — 두 번째 기기가 기존 소유자의 직책을 덮어쓰면 안 되기 때문.
+// TallyUni 0.5: 2단계에서 터미널 목록을 받는다. 그 전까지 터미널은 tenant.js 기본값(PCTC·PNCT)에
+//   묶여 있어, 다른 항만 회사가 마법사를 마쳐도 PORT-MIS 화면에 평택 부두 이름이 나왔다.
 import React, { useState } from 'react';
 import { Anchor, Database, Building2, UserCog, Check, AlertCircle, Image as ImageIcon } from 'lucide-react';
 import { SK } from '../utils.js';
@@ -36,6 +38,24 @@ export function homePortAliasesFor(code) {
   const set = new Set([c]);
   if (c.length === 5) set.add(c.slice(2));
   return [...set];
+}
+
+/** TallyUni 0.5: 터미널 한 줄 입력 → tenantCfg.terminals 배열.
+ *   "PCTC, PNCT" → [{ code:'PCTC', name:'PCTC', berths:[] }, { code:'PNCT', ... }]
+ *   쉼표로 나누고 · 앞뒤 공백을 버리고 · 대문자로 올리고 · 빈칸과 중복(먼저 쓴 것 유지)을 뺀다.
+ *   berths(부두 번호대)는 이번 판에서 비워 둔다 — 지금 소비처(PortMisCaptureModal)는 code·name만 쓴다.
+ *   ⚠ RTDB는 빈 배열을 저장하지 않는다. 서버에 심긴 settings.terminals의 각 항목은 berths 없이
+ *     {code, name}만 남고, 두 번째 기기는 그걸 그대로 불러온다(칩 렌더는 code·name만 보므로 결과 동일). */
+export function parseTerminals(text) {
+  const out = [];
+  const seen = new Set();
+  for (const part of String(text || '').split(',')) {
+    const code = part.trim().toUpperCase();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    out.push({ code, name: code, berths: [] });
+  }
+  return out;
 }
 
 // 로고를 canvas로 축소해 dataURL로. 150KB를 넘으면 크기·품질을 낮춰 다시 시도.
@@ -108,6 +128,8 @@ export default function SetupWizard() {
   const [homePort, setHomePort] = useState('');
   const [homePortName, setHomePortName] = useState('');
   const [appTitle, setAppTitle] = useState('');
+  // TallyUni 0.5: 기본값을 미리 채워 둔다 — 그대로 두면 PCTC·PNCT 두 곳으로 시작한다.
+  const [terminalsIn, setTerminalsIn] = useState(TENANT_DEFAULTS.terminals.map((t) => t.code).join(', '));
   const [logo, setLogo] = useState('');
   const [logoErr, setLogoErr] = useState('');
 
@@ -188,7 +210,10 @@ export default function SetupWizard() {
     catch (err) { setLogoErr(err.message || '로고를 처리하지 못했습니다.'); }
   };
 
-  const step2Ok = company.trim() && /^[A-Za-z]{5}$/.test(homePort.trim().toUpperCase()) && homePortName.trim();
+  // TallyUni 0.5: 터미널은 최소 한 곳. 빈 배열로 저장하면 RTDB가 그 키를 통째로 지워
+  //   두 번째 기기는 기본값(PCTC·PNCT)을 불러오게 된다 — 기기마다 부두가 달라지는 사고를 입구에서 막는다.
+  const termsParsed = parseTerminals(terminalsIn);
+  const step2Ok = company.trim() && /^[A-Za-z]{5}$/.test(homePort.trim().toUpperCase()) && homePortName.trim() && termsParsed.length > 0;
   const step3Ok = /^[가-힣a-zA-Z0-9]{2,10}$/.test(ownerNameIn.trim());
 
   const buildTenantCfg = () => {
@@ -201,6 +226,7 @@ export default function SetupWizard() {
       homePort: port,
       homePortAliases: homePortAliasesFor(port),
       homePortName: homePortName.trim(),
+      terminals: termsParsed,          // TallyUni 0.5: 마법사 입력이 단일 소스(기본값 PCTC·PNCT)
       owner: ownerNameIn.trim(),
     };
     if (logo) t.logo = logo;
@@ -369,6 +395,17 @@ export default function SetupWizard() {
               <div>
                 <label className={LB}>모항 이름 *</label>
                 <input className={IN} value={homePortName} onChange={(e) => setHomePortName(e.target.value)} placeholder="평택" />
+              </div>
+            </div>
+            <div>
+              <label className={LB}>터미널 (쉼표로 구분) *</label>
+              <input className={`${IN} uppercase`} value={terminalsIn}
+                     onChange={(e) => setTerminalsIn(e.target.value)} placeholder="PCTC, PNCT" />
+              <div className="text-[11px] mt-1 leading-relaxed">
+                <span className="text-slate-500">우리 회사가 검수하는 부두·터미널 이름입니다. PORT-MIS 화면의 부두별 집계에 씁니다.</span>
+                {termsParsed.length > 0
+                  ? <span className="text-slate-400"> — {termsParsed.length}곳: {termsParsed.map((t) => t.code).join(' · ')}</span>
+                  : <span className="text-amber-400"> — 한 곳 이상 입력하세요.</span>}
               </div>
             </div>
             <div>

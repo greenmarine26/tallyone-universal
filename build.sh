@@ -36,11 +36,16 @@ if [ -n "$APPVER" ]; then
   # __CONEV(콘앱 화면 자동갱신 감지 키)도 동기화 — V8.46에 멈춰 폰이 새 cone.html을 감지 못 하던 문제.
   # ConeOne 1.0: __CONEV는 콘앱 자체 버전 단일 소스 — 검수앱 버전으로 덮지 않는다(콘앱 수정 시 수동으로 올림).
   echo "✓ cone.html 화면 갱신키(__CONEV) = $CONEVER (콘앱 단일 소스, 동기화 안 함)"
-  # V9.05-03: README 제목 버전도 동기화 — V8.09-03에 멈춰 있던 불일치 재발 방지.
-  # TallyUni 0.2: 앱 이름이 TallyUni로 바뀌면서 이 sed의 대상 목록에 TallyUni가 없어
-  #   README 제목이 0.1에 멈춰 있었다(빌드는 성공했는데 라벨만 옛것 — V9.05-03과 똑같은 재발).
-  sed -i "s/^# \(Tallyman Master\|TallyOne\|TallyUni\).*/# $APPVER (구 Tallyman Master)/" README.md
-  echo "✓ README.md 제목 버전 → $APPVER 동기화"
+  # V9.05-03: README 버전도 동기화 — V8.09-03에 멈춰 있던 불일치 재발 방지.
+  # TallyUni 0.5: 동기화 대상이 제목 → 버전 줄로 바뀌었다. README가 제품 소개문이 되면서
+  #   제목은 제품명(TallyOne Universal)으로 고정하고, 판 번호는 바로 아래 인용 줄 하나가 단일 표시점이다.
+  #   (옛 sed는 '# TallyOne...'을 통째로 갈아엎어 새 제목을 매 빌드마다 깨뜨렸다.)
+  sed -i "s|^> \*\*현재 버전\*\* · .*|> **현재 버전** · $APPVER|" README.md
+  if ! grep -q "^> \*\*현재 버전\*\* · $APPVER$" README.md; then
+    echo "✗ README.md 버전 줄 동기화 실패 — '> **현재 버전** · …' 줄이 있는지 확인"
+    exit 1
+  fi
+  echo "✓ README.md 버전 줄 → $APPVER 동기화"
   # V9.07-05 정리: 벌크탤리 버전 라벨도 동기화 — 이전엔 버전 문자열 자체가 없어
   #   벌크탤리만 "언제 판인지" 알 수 없었다(지침서에 '2026-06-12판'으로 방치).
   sed -i "s/<meta name=\"app-version\" content=\"(주)그린마린 · [^\"]*\">/<meta name=\"app-version\" content=\"(주)그린마린 · $APPVER\">/" bulk_tally.html
