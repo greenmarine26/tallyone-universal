@@ -492,6 +492,20 @@ def test_gui_smoke():
         check("저장 → config.json 기록",
               saved is not None and os.path.exists(cfg_path)
               and core.load_config(cfg_path)["email"] == "me@gmail.com")
+
+        # 0.6-01 회귀 — 화면에 칸이 없는 설정이 [설정 저장]에서 사라지면 안 된다.
+        #   라이브 사고: config.json 에 berth_plan 이 없어 0.6 첫 기동이 배정표를 안 읽었다.
+        check("저장해도 화면에 없는 설정이 살아 있다(berth_plan·excluded_routes·home_port_aliases)",
+              cfg.get("berth_plan") is True
+              and cfg.get("excluded_routes") == ["PXS", "PQS", "JWKP"]
+              and cfg.get("home_port_aliases"),
+              json.dumps({k: cfg.get(k) for k in
+                          ("berth_plan", "excluded_routes", "home_port_aliases")},
+                         ensure_ascii=False))
+        app2 = gui.MailPilotGUI(config_path=cfg_path)
+        app2.extra_cfg["excluded_routes"] = ["ZZZ"]
+        check("사람이 손으로 고친 설정도 다시 저장할 때 지켜진다",
+              app2.collect_config().get("excluded_routes") == ["ZZZ"])
     except Exception as exc:
         check("GUI 스모크", False, "%s: %s" % (type(exc).__name__, exc))
     finally:

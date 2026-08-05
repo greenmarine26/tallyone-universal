@@ -56,6 +56,10 @@ class MailPilotGUI:
         self._vessel_rows = []
 
         cfg = core.load_config(self.config_path) or dict(core.DEFAULT_CONFIG)
+        # 0.6 — 화면에 칸이 없는 설정(모항 별칭·선석배정·비관할 항로 …)을 기억해 뒀다가
+        #   저장할 때 그대로 되돌려 넣는다. 종전엔 [설정 저장]이 화면 칸만으로 config 를 새로
+        #   만들어 이 값들이 사라졌다(0.6 첫 기동에서 berth_plan 이 없어져 배정표를 못 읽었다).
+        self.extra_cfg = {k: v for k, v in cfg.items() if k not in self.GUI_FIELDS}
         self.provider_labels = {k: v["label"] for k, v in core.PRESETS.items()}
         self.label_to_key = {v: k for k, v in self.provider_labels.items()}
 
@@ -523,8 +527,13 @@ class MailPilotGUI:
         except Exception as exc:
             core.log("알림 표시 실패: %s" % exc)
 
+    # 화면이 직접 관리하는 칸 — 이 밖의 설정은 collect_config 가 손대지 않고 그대로 물려준다.
+    GUI_FIELDS = ("provider", "protocol", "host", "port", "ssl", "imap_host", "imap_port",
+                  "email", "password", "mailbox_root", "collect_days", "poll_minutes",
+                  "firebase")
+
     def collect_config(self):
-        """화면 입력 → config 딕셔너리."""
+        """화면 입력 → config 딕셔너리. 화면에 없는 설정은 읽어 둔 값을 그대로 지킨다."""
         def _int(value, default):
             try:
                 return int(str(value).strip())
@@ -533,7 +542,9 @@ class MailPilotGUI:
         host = self.var_host.get().strip()
         protocol = (self.var_protocol.get() or "imap").strip().lower()
         port = _int(self.var_port.get(), 995 if protocol == "pop3" else 993)
-        return {
+        cfg = dict(core.DEFAULT_CONFIG)
+        cfg.update(getattr(self, "extra_cfg", {}) or {})
+        cfg.update({
             "provider": self.current_provider(),
             "protocol": protocol,
             "host": host,
@@ -548,7 +559,8 @@ class MailPilotGUI:
             "collect_days": _int(self.var_days.get(), 7),
             "poll_minutes": _int(self.var_poll.get(), 10),
             "firebase": core.parse_firebase_config(self.txt_fb.get("1.0", "end")),
-        }
+        })
+        return cfg
 
     def missing_fields(self, cfg=None):
         """수집에 반드시 필요한 값 중 비어 있는 것(이메일·비밀번호·메일박스 폴더)."""

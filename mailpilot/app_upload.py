@@ -27,7 +27,7 @@ import berth_schedule as bsch                       # 0.6 — 터미널 선석�
 import edi_parser as ep
 
 STATE_V = 1                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
-PARSER_TAG = "MailPilot Uni 0.6 (edi_parser)"
+PARSER_TAG = "MailPilot Uni 0.6-01 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
 # 홈포트(모항) 판정 — 검수앱 src/utils.js 의 PYEONGTAEK_CODES / PYEONGTAEK_SUFFIX 와 같은 기준.

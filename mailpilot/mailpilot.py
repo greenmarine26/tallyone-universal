@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.6"
+VERSION = "MailPilot Uni 0.6-01"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -222,6 +222,9 @@ DEFAULT_CONFIG = {
     "mailbox_root": "",
     "collect_days": 7,
     "poll_minutes": 10,
+    # 우리 항(모항)으로 볼 항구 코드 — app_upload.DEFAULT_HOME_PORT_ALIASES 와 같은 값.
+    #   여기 적어 두어야 [설정 저장] 때도 살아 남는다(0.6-01).
+    "home_port_aliases": ["PTK", "KRPTK", "KRPYT", "PYT", "KRPYOTM", "PYOTM", "KRPYO"],
     # 0.6 — 터미널 선석배정(공개 조회) 사용 여부와 비관할 항로(등록 제외, 검수사 확정)
     "berth_plan": True,
     "excluded_routes": ["PXS", "PQS", "JWKP"],
