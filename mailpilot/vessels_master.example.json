@@ -1,0 +1,14 @@
+[
+  {
+    "code": "ABCD",
+    "name": "ALPHA BRAVO",
+    "aliases": ["ALBR", "AB"],
+    "ko": ["알파해운", "阿尔法"]
+  },
+  {
+    "code": "EFGH",
+    "name": "ECHO FOXTROT",
+    "aliases": ["ECFX"],
+    "ko": ["에코훼리"]
+  }
+]

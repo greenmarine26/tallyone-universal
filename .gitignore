@@ -9,6 +9,7 @@ _render*.mjs
 *.zip
 mailpilot/config.json
 mailpilot/vessels_cache.json
+mailpilot/vessels_master.json
 mailpilot/logs/
 mailpilot/__pycache__/
 mailpilot/tests/__pycache__/

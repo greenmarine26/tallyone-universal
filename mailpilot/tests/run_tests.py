@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.3 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
+# 메일파일럿 Uni 0.4 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
 """실행: python mailpilot/tests/run_tests.py
 
   1) 판독 유닛테스트 — 실제 유형 제목 12종 → 선박/항차/코드 표
@@ -18,6 +18,9 @@
  14) GUI — 수집 중 [폴더 정리] 잠금 · --autostart 무인 시작(설정 불완전이면 시작 안 함)
  15) 버전 라벨 — README·run_mailpilot.bat 이 core.VERSION 과 같은지, --autostart 전달
  16) 로그 출력 안전 — cp949 파일/파이프 출력에서도 UnicodeEncodeError 로 죽지 않는다
+ 17) 선박 정본표 — 실제 미분류 제목이 정본 코드로 붙는지 · 별칭 오인 방지 · 마스터 없음 회귀
+ 18) 정본 이관 — 캐시 코드 갈아끼우기 · 폴더 병합(충돌 스킵) · 체크 이월 · 서버 노드 · 멱등
+ 19) GUI — 정본/미확인 행 표시 · [정본 연결…] 병합 · [항목 삭제] · [정본표 가져오기…]
 """
 
 import datetime
@@ -409,6 +412,8 @@ def _install_fake_tkinter():
                   "TOP", "BOTTOM", "DISABLED", "NORMAL"):
         setattr(tk, const, const.lower())
 
+    tk.Toplevel = FakeTk                             # 0.4 [정본 연결…] 작은 창
+
     ttk = types.ModuleType("tkinter.ttk")
     for widget in ("Frame", "Label", "Entry", "Button", "Combobox",
                    "Scrollbar", "LabelFrame", "Notebook", "Checkbutton", "Radiobutton"):
@@ -416,6 +421,7 @@ def _install_fake_tkinter():
 
     filedialog = types.ModuleType("tkinter.filedialog")
     filedialog.askdirectory = lambda **k: ""
+    filedialog.askopenfilename = lambda **k: ""      # 시험 중에는 파일 고르기 창을 띄우지 않는다
     messagebox = types.ModuleType("tkinter.messagebox")
     messagebox.showinfo = lambda *a, **k: None
     messagebox.showwarning = lambda *a, **k: None
@@ -1309,11 +1315,293 @@ def test_log_encoding_safety():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ────────────────────── 17) 선박 정본표 — 판독에 정본 우선 ──────────────────────
+
+# 현장 정본표(37척)와 같은 모양의 시험용 정본표(실제 값 일부 + 이번 판에서 보강한 별칭)
+MASTER_FIXTURE = [
+    {"code": "OBWH", "name": "OCEAN BLUE WHALE", "aliases": ["OWBH"], "ko": ["연태훼리"]},
+    {"code": "TNJP", "name": "TEN JUPITER", "aliases": ["LYTJ"], "ko": ["연운항훼리"]},
+    {"code": "RZOR", "name": "RIZHAO ORIENT",
+     "aliases": ["R063", "R064", "RD"], "ko": ["일조국제물류", "일조국제", "日照东方", "日照"]},
+    {"code": "DXQD", "name": "XIN QUN DAO", "aliases": ["XINQUNDAO"], "ko": []},
+    {"code": "XTPG", "name": "XIN TAI PING", "aliases": ["XTT", "JXTP", "XTP"], "ko": []},
+    {"code": "SWSP", "name": "SAWASDEE SPICA", "aliases": [], "ko": []},
+    {"code": "ATPR", "name": "ATLANTIC PIONEER", "aliases": ["ATRP"], "ko": []},
+    {"code": "KSKM", "name": "SUNNY KALMIA", "aliases": [], "ko": []},
+    {"code": "NSFR", "name": "STAR FRONTIER", "aliases": [], "ko": []},
+]
+
+# 오늘 실제로 _미분류 로 떨어졌던 제목들 — 정본표가 있으면 붙어야 한다
+MASTER_CASES = [
+    ("연태훼리 2706W CLL 3차 (VGM최종본/231VAN)", [], "OBWH", "2706W"),
+    ("[연운항훼리] 26354W LOADING LIST - 최종리스트", [], "TNJP", "26354W"),
+    ("일조국제물류) R083W CLL 송부 드립니다._최종", [], "RZOR", "R083W"),
+    ("日照东方船图 R082E", [], "RZOR", "R082E"),
+    ("M.V. XINQUNDAO V.2630W // DALIAN DISCH LIST(AFTER KRPTK)", [], "DXQD", "2630W"),
+    ("XIN TAI PING V-0535E Container Discharging List (In Bound)", [], "XTPG", "0535E"),
+    ("(SKR-PTK) SAWASDEE SPICA 2606N CONTAINER LOADING LIST", [], "SWSP", "2606N"),
+    ("자료 송부드립니다", ["XTPG0535E_CDL.xlsx"], None, None),      # 항차 토큰이 없어 종전대로 미분류
+]
+
+
+def test_master_read():
+    print("\n[17] 선박 정본표 — 정본이 자동 생성 코드보다 먼저")
+    rows, ok_all = [], True
+    for subject, files, want_code, want_voyage in MASTER_CASES:
+        cache = {"names": {}, "codes": {}}
+        target = core.read_mail_target(subject, files, cache, MASTER_FIXTURE)
+        code = target["code"] if target["ok"] else None
+        voyage = target["voyage"] if target["ok"] else None
+        rows.append((subject, code, voyage, target["vessel"] or "-",
+                     "적재" if target["ok"] else "미분류(%s)" % target["reason"]))
+        good = (code == want_code) and (voyage == want_voyage)
+        ok_all = ok_all and good
+        if not good:
+            print("    기대 %s/%s ≠ 실제 %s/%s :: %s" % (want_code, want_voyage, code, voyage, subject))
+    print("\n    %-58s %-5s %-8s %-18s %s" % ("제목", "코드", "항차", "정식명", "결과"))
+    print("    " + "-" * 108)
+    for subject, code, voyage, vessel, verdict in rows:
+        print("    %-58s %-5s %-8s %-18s %s"
+              % (subject[:56], code or "-", voyage or "-", vessel, verdict))
+    print("")
+    check("정본표 판독 8종 기대값 일치", ok_all)
+
+    # 한글 별칭은 괄호 마스킹 전 원문에서 봐야 한다([연운항훼리] 는 대괄호 안에 있다)
+    hit = core.match_master("[연운항훼리] 26354W LOADING LIST", MASTER_FIXTURE)
+    check("괄호 안 한글 별칭도 원문 그대로 읽는다", hit is not None and hit["code"] == "TNJP",
+          (hit or {}).get("code", "없음"))
+
+    # 별칭 오인 방지 — XTP 는 XTPG0535E 안에서 걸리면 안 되고, 코드 XTPG 로 붙어야 한다
+    glued = core.match_master("XTPG0535E_CDL.xlsx", MASTER_FIXTURE)
+    check("XTPG0535E 는 별칭 XTP 가 아니라 코드 XTPG 로 잡힌다",
+          glued is not None and glued["code"] == "XTPG", (glued or {}).get("code", "없음"))
+    check("별칭이 다른 낱말의 앞부분이면 안 잡힌다(XTPGOODS)",
+          core.match_master("XTPGOODS 2601E LIST", MASTER_FIXTURE) is None)
+
+    # 자동으로 뽑은 이름의 정본 귀속 — 'TAI PING' → XIN TAI PING · 'TNJP' → 코드 일치
+    check("자동 이름 'TAI PING' 이 정본 XTPG 로 귀속",
+          (core.master_code_for_name("TAI PING", MASTER_FIXTURE) or {}).get("code") == "XTPG")
+    check("자동 이름이 코드와 같으면 그 정본(TNJP)",
+          (core.master_code_for_name("TNJP", MASTER_FIXTURE) or {}).get("code") == "TNJP")
+    check("정본에 없는 이름은 귀속하지 않는다(INC SKM)",
+          core.master_code_for_name("INC SKM", MASTER_FIXTURE) is None)
+
+    # 모호하면 합치지 않는다 — 서로 다른 정본이 같은 길이로 걸리면 실패 처리
+    tie = [{"code": "AAAA", "name": "ALPHA", "aliases": [], "ko": []},
+           {"code": "BBBB", "name": "BRAVO", "aliases": [], "ko": []}]
+    check("서로 다른 정본이 동률이면 매칭 실패(모호 병합 금지)",
+          core.match_master("ALPHA BRAVO 2601E LIST", tie) is None)
+
+    # 정본에 걸려도 항차가 없으면 종전대로 미분류
+    none_voy = core.read_mail_target("연태훼리 CLL 송부드립니다", [], {"names": {}, "codes": {}},
+                                     MASTER_FIXTURE)
+    check("정본에 걸려도 항차가 없으면 미분류(판독 규칙 그대로)",
+          not none_voy["ok"] and none_voy["reason"] == "항차 판독 실패", none_voy["reason"])
+
+    # 마스터 없음(빈 목록) — 0.3 과 똑같이 동작
+    same = True
+    for subject, files, _v, _voy in FIXTURES:
+        a = core.read_mail_target(subject, files, {"names": {}, "codes": {}})
+        b = core.read_mail_target(subject, files, {"names": {}, "codes": {}}, [])
+        if a != b:
+            same = False
+    check("정본표가 비어 있으면 0.3 과 완전히 같은 판독", same)
+    empty_master = core.load_master(os.path.join(HERE, "없는파일.json"))
+    check("정본표 파일이 없으면 빈 목록", empty_master == [])
+
+    # 정본으로 확정되면 캐시에도 정식명으로 심긴다(선박 목록·폴더 정리가 알아보도록)
+    cache = {"names": {}, "codes": {}}
+    core.read_mail_target("연태훼리 2706W CLL", [], cache, MASTER_FIXTURE)
+    check("정본 판독 결과가 캐시에 정식명으로 남는다",
+          cache["codes"].get("OBWH") == "OCEAN BLUE WHALE"
+          and cache["names"].get("OCEAN BLUE WHALE") == "OBWH",
+          json.dumps(cache["codes"], ensure_ascii=False))
+
+
+# ────────────────────── 18) 정본 이관(기동 시 일괄) ──────────────────────
+
+class _StubFirebase:
+    """이관이 서버에 무엇을 하는지만 보는 대역(실 서버에 절대 붙지 않는다)."""
+
+    enabled = True
+
+    def __init__(self):
+        self.calls = []
+        self.nodes = {}
+
+    def register_vessel(self, code, name, last_mail_at=None, tally=None):
+        self.calls.append(("patch", code))
+        self.nodes[code] = {"name": name, "tally": tally}
+        return {"name": name}
+
+    def delete(self, path):
+        self.calls.append(("delete", path))
+        self.nodes.pop(path.rsplit("/", 1)[-1], None)
+        return None
+
+    def get(self, path, params=None):
+        return self.nodes.get(path.rsplit("/", 1)[-1])
+
+
+def test_migrate_master():
+    print("\n[18] 정본 이관 — 자동 코드 → 정본 코드(캐시·폴더·서버, 멱등)")
+    tmp = tempfile.mkdtemp(prefix="mailpilot_mig_")
+    root = os.path.join(tmp, "MAILBOX")
+    try:
+        _touch(os.path.join(root, "TAPN", "0535E", "a.txt"))
+        _touch(os.path.join(root, "TAPN", "0536E", "b.txt"))
+        _touch(os.path.join(root, "XTPG", "0535E", "already.txt"))     # 충돌 유발(같은 항차)
+        _touch(os.path.join(root, core.OTHER_DIR, "SWS2", "2606N", "c.txt"))
+        _touch(os.path.join(root, "RDDR", "R083W", "d.txt"))
+        _touch(os.path.join(root, "INSK", "2601E", "e.txt"))           # 정본에 없는 배 — 무접촉
+        before = _all_files(root)
+
+        cache = {"names": {"TAI PING": "TAPN", "SAWASDEE SPICA": "SWS2", "RD": "RDDR",
+                           "INC SKM": "INSK", "XTPG": "XTPG"},
+                 "codes": {"TAPN": "TAI PING", "SWS2": "SAWASDEE SPICA", "RDDR": "RD",
+                           "INSK": "INC SKM", "XTPG": "XTPG"},
+                 "tally": {"SWS2": False, "TAPN": True}}
+        fb = _StubFirebase()
+        result = core.migrate_to_master(root, cache, MASTER_FIXTURE, firebase=fb)
+        moves = sorted("%s→%s" % (p["old"], p["new"]) for p in result["plan"])
+        print("    이관: %s" % moves)
+        print("    미확인 잔류: %s" % sorted(old for _n, old in result["unmatched"]))
+
+        check("이관 표대로 3건(TAPN→XTPG · RDDR→RZOR · SWS2→SWSP)",
+              moves == ["RDDR→RZOR", "SWS2→SWSP", "TAPN→XTPG"], ", ".join(moves))
+        check("정본에 없는 배(INSK)는 그대로 둔다",
+              cache["names"].get("INC SKM") == "INSK" and cache["codes"].get("INSK") == "INC SKM")
+        check("이미 정본 코드인 항목은 정식명만 맞춘다(XTPG)",
+              cache["codes"].get("XTPG") == "XIN TAI PING", cache["codes"].get("XTPG"))
+        check("캐시 이름이 정본 코드를 가리킨다",
+              cache["names"]["TAI PING"] == "XTPG" and cache["names"]["RD"] == "RZOR"
+              and cache["names"]["SAWASDEE SPICA"] == "SWSP")
+        check("옛 코드는 codes 에서 빠진다",
+              all(c not in cache["codes"] for c in ("TAPN", "SWS2", "RDDR")),
+              ", ".join(sorted(cache["codes"])))
+        check("검수 대상 '끔' 은 새 코드로 이월된다(SWS2 → SWSP=False)",
+              cache["tally"].get("SWSP") is False and "SWS2" not in cache["tally"],
+              json.dumps(cache["tally"]))
+
+        after = _all_files(root)
+        print("    이관 후 파일: %s" % after)
+        check("충돌 없는 항차는 정본 폴더로 이동(TAPN/0536E → XTPG/0536E)",
+              os.path.exists(os.path.join(root, "XTPG", "0536E", "b.txt")))
+        check("같은 항차가 양쪽에 있으면 건너뛰고 둘 다 보존",
+              os.path.exists(os.path.join(root, "TAPN", "0535E", "a.txt"))
+              and os.path.exists(os.path.join(root, "XTPG", "0535E", "already.txt"))
+              and len(result["skipped"]) == 1, "건너뜀 %d건" % len(result["skipped"]))
+        check("_기타 안의 폴더도 정본 코드로 옮긴다(_기타/SWS2 → _기타/SWSP)",
+              os.path.exists(os.path.join(root, core.OTHER_DIR, "SWSP", "2606N", "c.txt")))
+        check("별칭으로 붙는 폴더도 옮긴다(RDDR → RZOR)",
+              os.path.exists(os.path.join(root, "RZOR", "R083W", "d.txt")))
+        check("정본에 없는 폴더는 무접촉(INSK)",
+              os.path.exists(os.path.join(root, "INSK", "2601E", "e.txt")))
+        check("파일은 하나도 지워지지 않는다(개수 동일)",
+              len(before) == len(after) == 6, "이관 전 %d · 후 %d" % (len(before), len(after)))
+
+        check("서버 — 정본 코드 등록 + 옛 코드 노드 삭제",
+              ("patch", "XTPG") in fb.calls and ("delete", "vessels/TAPN") in fb.calls
+              and "TAPN" not in fb.nodes and "XTPG" in fb.nodes,
+              ", ".join("%s %s" % c for c in fb.calls))
+
+        result2 = core.migrate_to_master(root, cache, MASTER_FIXTURE, firebase=fb)
+        check("두 번 돌려도 안전(추가 이관·이동 없음 · 파일 그대로)",
+              result2["plan"] == [] and result2["moved"] == [] and _all_files(root) == after,
+              "이관 %d건" % len(result2["plan"]))
+
+        # 정본표가 없으면 아무것도 하지 않는다(0.3 그대로)
+        untouched = core.migrate_to_master(root, cache, [])
+        check("정본표가 비면 이관하지 않는다", untouched["plan"] == [] and untouched["moved"] == [])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 19) GUI — 정본 표시 · 연결 · 삭제 · 가져오기 ──────────────────────
+
+def test_gui_master():
+    print("\n[19] GUI — 정본/미확인 표시 · 정본 연결 · 항목 삭제 · 정본표 가져오기")
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        _install_fake_tkinter()
+    tmp = tempfile.mkdtemp(prefix="mailpilot_gui_master_")
+    root = os.path.join(tmp, "MAILBOX")
+    cfg_path = os.path.join(tmp, "config.json")
+    cache_path = os.path.join(tmp, "vessels_cache.json")
+    master_path = os.path.join(tmp, "vessels_master.json")
+    source_path = os.path.join(tmp, "가져올_정본표.json")
+    try:
+        core.save_cache({"names": {"XTPG": "XTPG", "INC SKM": "INSK", "TAI PING": "TAPN"},
+                         "codes": {"XTPG": "XIN TAI PING", "INSK": "INC SKM", "TAPN": "TAI PING"}},
+                        cache_path)
+        with open(master_path, "w", encoding="utf-8") as fh:
+            json.dump(MASTER_FIXTURE, fh, ensure_ascii=False)
+        _touch(os.path.join(root, "INSK", "2601E", "x.txt"))
+
+        import gui
+        app = gui.MailPilotGUI(config_path=cfg_path, cache_path=cache_path,
+                               master_path=master_path)
+        app.var_root.set(root)
+        check("정본표를 읽어 온다", len(app.vessel_master) == len(MASTER_FIXTURE),
+              "%d척" % len(app.vessel_master))
+        check("정본 행은 '코드 — 정식 선박명'",
+              app.vessel_row_label("XTPG") == "XTPG — XIN TAI PING", app.vessel_row_label("XTPG"))
+        check("정본에 없는 행은 '(미확인)'",
+              app.vessel_row_label("INSK") == "INSK — INC SKM (미확인)", app.vessel_row_label("INSK"))
+        check("정본 연결 콤보 목록", app.master_choices()[0].startswith("ATPR — "),
+              app.master_choices()[0])
+
+        out = app.link_master_now("INSK", "KSKM")
+        check("[정본 연결] — 캐시가 정본 코드로 바뀐다",
+              app.cache["names"].get("INC SKM") == "KSKM" and "INSK" not in app.cache["codes"],
+              json.dumps(app.cache["codes"], ensure_ascii=False))
+        check("[정본 연결] — 폴더도 함께 옮긴다",
+              os.path.exists(os.path.join(root, "KSKM", "2601E", "x.txt"))
+              and out is not None and len(out["moved"]) == 1)
+        check("[정본 연결] — 연결한 뒤에는 정식명으로 보인다",
+              app.vessel_row_label("KSKM") == "KSKM — SUNNY KALMIA", app.vessel_row_label("KSKM"))
+        check("[정본 연결] — 정본표에 없는 코드는 거절",
+              app.link_master_now("KSKM", "ZZZZ") is None)
+
+        app.delete_vessel_now("KSKM")
+        check("[항목 삭제] — 목록에서만 빠지고 폴더·파일은 그대로",
+              "KSKM" not in app.cache["codes"]
+              and os.path.exists(os.path.join(root, "KSKM", "2601E", "x.txt")))
+
+        # [정본표 가져오기…] — 파일을 자리에 놓고 곧바로 이관까지
+        os.remove(master_path)
+        app2 = gui.MailPilotGUI(config_path=cfg_path, cache_path=cache_path,
+                                master_path=master_path)
+        app2.var_root.set(root)
+        check("정본표가 없으면 모두 '(미확인)'",
+              app2.vessel_row_label("TAPN") == "TAPN — TAI PING (미확인)",
+              app2.vessel_row_label("TAPN"))
+        with open(source_path, "w", encoding="utf-8") as fh:
+            json.dump(MASTER_FIXTURE, fh, ensure_ascii=False)
+        res = app2.import_master_now(source_path)
+        check("[정본표 가져오기] — 파일이 자리에 놓인다", os.path.exists(master_path))
+        check("[정본표 가져오기] — 곧바로 이관까지 돈다(TAPN → XTPG)",
+              res is not None and any(p["old"] == "TAPN" and p["new"] == "XTPG"
+                                      for p in res["plan"])
+              and app2.cache["names"]["TAI PING"] == "XTPG",
+              json.dumps(res["plan"] if res else [], ensure_ascii=False))
+        check("[정본표 가져오기] — 읽을 수 없는 파일은 자리에 놓지 않는다",
+              app2.import_master_now(os.path.join(tmp, "없는파일.json")) is None)
+    except Exception as exc:
+        check("GUI 정본표", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
           % (core.VERSION, sys.version.split()[0]))
     print("=" * 60)
+    # 시험은 이 PC 에 놓인 실제 정본표를 읽지 않는다 — 기본값은 '정본표 없음'(0.3 회귀 기준).
+    # 정본표가 필요한 시험(17~19)은 스스로 픽스처·임시 파일을 넘겨 쓴다.
+    core.MASTER_PATH = os.path.join(tempfile.gettempdir(), "mailpilot_시험_정본표없음.json")
     test_read_table()
     test_code_stability()
     test_firebase_parser()
@@ -1330,6 +1618,9 @@ def main():
     test_gui_lock_and_autostart()
     test_version_labels()
     test_log_encoding_safety()
+    test_master_read()
+    test_migrate_master()
+    test_gui_master()
 
     failed = [name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

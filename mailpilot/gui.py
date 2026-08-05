@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.3 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
+# 메일파일럿 Uni 0.4 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
 # ⚠ 보안: 여기서 입력한 비밀번호는 config.json 에 평문 저장된다. 개인 PC 전용, 공용 PC 금지.
 """tkinter 설정 창.
 
@@ -12,12 +12,16 @@
                   · 파이어베이스 익명 인증 + 시험 쓰기
   · 지금 수집 조건을 한국어로 상시 표시(최근 며칠·주기·받는 첨부·미분류 보존·원본 보존)
   · 발견된 선박 체크리스트 — 체크를 끄면 그 선박의 새 메일은 _기타 로 간다([폴더 정리]로 기존 폴더도 왕복)
+    · 정본표에 있는 배는 "코드 — 정식 선박명", 없는 배는 "(미확인)" 으로 보인다
+    · 미확인 항목은 [정본 연결…] 로 정본 코드에 합치거나 [항목 삭제] 로 목록에서 뺀다
+    · [정본표 가져오기…] 로 선박 정본표(json)를 등록하면 곧바로 이관까지 돈다
   · [저장] [수집 시작/중지] · 최근 로그 표시 — 수집 중에는 [폴더 정리]가 잠긴다
   · `python gui.py --autostart` — 설정이 갖춰져 있으면 창이 뜬 직후 수집을 스스로 시작한다(무인 재시작)
 """
 
 import os
 import queue
+import shutil
 import sys
 import threading
 
@@ -34,9 +38,10 @@ PAD = 6
 class MailPilotGUI:
     """설정 + 상태 창 본체."""
 
-    def __init__(self, master=None, config_path=None, cache_path=None):
+    def __init__(self, master=None, config_path=None, cache_path=None, master_path=None):
         self.config_path = config_path or core.CONFIG_PATH
         self.cache_path = cache_path or core.CACHE_PATH
+        self.master_path = master_path or core.MASTER_PATH     # 선박 정본표 파일 자리
         self.master = master or tk.Tk()
         self.master.title("메일파일럿 Uni %s — 설정"
                           % core.VERSION.split()[-1])
@@ -45,6 +50,8 @@ class MailPilotGUI:
         self.log_queue = queue.Queue()
         # 선박 캐시는 GUI 와 Collector 가 '같은 딕셔너리'를 본다(체크를 켜고 끄면 즉시 반영된다)
         self.cache = core.load_cache(self.cache_path)
+        # 선박 정본표 — 있으면 목록에 정식 선박명이 뜨고, 없으면 모두 '(미확인)' 으로 보인다
+        self.vessel_master = core.load_master(self.master_path)
         self.tally_vars = {}
         self._vessel_rows = []
 
@@ -148,9 +155,13 @@ class MailPilotGUI:
         head = ttk.Frame(box_v)
         head.pack(fill="x")
         ttk.Label(head, text="체크를 끄면 그 선박의 새 메일은 _기타 폴더로 들어갑니다. "
-                             "발견 자체는 계속 기록됩니다.",
+                             "발견 자체는 계속 기록됩니다.\n"
+                             "정본표에 없는 배는 (미확인) 으로 보입니다 — [정본 연결…] 로 합치거나 "
+                             "[항목 삭제] 로 목록에서 뺍니다.",
                   foreground="#555", justify="left").pack(side="left")
         ttk.Button(head, text="새로고침", command=self.on_refresh_vessels).pack(side="right")
+        ttk.Button(head, text="정본표 가져오기…", command=self.on_import_master).pack(
+            side="right", padx=PAD)
         # 수집 중에는 잠근다 — 옮기는 도중에 새 첨부가 떨어지면 반쪽만 정리된다
         self.btn_organize = ttk.Button(head, text="폴더 정리", command=self.on_organize)
         self.btn_organize.pack(side="right", padx=PAD)
@@ -253,8 +264,15 @@ class MailPilotGUI:
                 core.log("수집 조건 자동 갱신을 걸지 못했습니다(%s) — 저장 시 갱신됩니다." % exc)
 
     # ────────────────────── 발견된 선박 체크리스트 ──────────────────────
+    def vessel_row_label(self, code):
+        """행 문구 — 정본에 있으면 '코드 — 정식 선박명', 없으면 '코드 — 읽어낸 이름 (미확인)'."""
+        item = core.master_by_code(self.vessel_master, code)
+        if item:
+            return "%s — %s" % (code, item["name"])
+        return "%s — %s (미확인)" % (code, (self.cache.get("codes") or {}).get(code, code))
+
     def _render_vessels(self):
-        """캐시의 codes 를 코드순으로 체크박스 목록으로 그린다."""
+        """캐시의 codes 를 코드순으로 체크박스 목록으로 그린다(미확인 행에는 손질 단추를 붙인다)."""
         for widget in self._vessel_rows:
             try:
                 widget.destroy()
@@ -273,14 +291,24 @@ class MailPilotGUI:
         for row, code in enumerate(sorted(codes)):
             var = tk.BooleanVar(self.master, core.tally_enabled(self.cache, code))
             self.tally_vars[code] = var
-            chk = ttk.Checkbutton(self.frm_vessels, text="%s — %s" % (code, codes[code]),
+            chk = ttk.Checkbutton(self.frm_vessels, text=self.vessel_row_label(code),
                                   variable=var,
                                   command=lambda c=code: self.on_toggle_tally(c))
             chk.grid(row=row, column=0, sticky="w")
             self._vessel_rows.append(chk)
+            if core.master_by_code(self.vessel_master, code) is not None:
+                continue                              # 정본에 있는 배는 손질 단추가 필요 없다
+            btn_link = ttk.Button(self.frm_vessels, text="정본 연결…",
+                                  command=lambda c=code: self.on_link_master(c))
+            btn_link.grid(row=row, column=1, sticky="w", padx=(PAD, 0))
+            btn_del = ttk.Button(self.frm_vessels, text="항목 삭제",
+                                 command=lambda c=code: self.on_delete_vessel(c))
+            btn_del.grid(row=row, column=2, sticky="w", padx=(PAD, 0))
+            self._vessel_rows.extend([btn_link, btn_del])
 
     def on_refresh_vessels(self):
-        """캐시를 다시 읽어 목록을 새로 그린다(수집 중 새로 발견된 선박 반영)."""
+        """캐시·정본표를 다시 읽어 목록을 새로 그린다(수집 중 새로 발견·이관된 선박 반영)."""
+        self.vessel_master = core.load_master(self.master_path)
         fresh = core.load_cache(self.cache_path)
         # 같은 딕셔너리를 계속 쓴다 — Collector 와 공유 중이라 통째로 바꾸면 연결이 끊긴다
         self.cache["names"] = fresh.get("names", {})
@@ -324,6 +352,130 @@ class MailPilotGUI:
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         return thread
+
+    # ────────────────────── 정본표(선박 정본 코드) ──────────────────────
+    def _firebase_or_none(self):
+        """화면에 붙여넣은 firebaseConfig 로 REST 객체를 만든다(모자라면 None — 로컬만 고친다)."""
+        fb_cfg = core.parse_firebase_config(self.txt_fb.get("1.0", "end"))
+        if not fb_cfg:
+            return None
+        fb = core.FirebaseREST(fb_cfg)
+        if not fb.enabled:
+            core.log("firebaseConfig 에 apiKey/databaseURL 이 모자라 서버 반영은 건너뜁니다.")
+            return None
+        return fb
+
+    def master_choices(self):
+        """정본 연결 콤보에 쓸 '코드 — 정식 선박명' 목록(코드순)."""
+        return ["%s — %s" % (item["code"], item["name"])
+                for item in sorted(self.vessel_master, key=lambda x: x["code"])]
+
+    def on_link_master(self, code):
+        """미확인 항목 하나를 어느 정본에 합칠지 고르는 작은 창."""
+        if not self.vessel_master:
+            messagebox.showwarning("정본 연결",
+                                   "선박 정본표가 없습니다.\n[정본표 가져오기…] 로 먼저 등록하십시오.")
+            return None
+        choices = self.master_choices()
+        win = tk.Toplevel(self.master)
+        win.title("정본 연결 — %s" % code)
+        frame = ttk.Frame(win, padding=PAD)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="%s 을(를) 어느 정본 선박으로 합칠까요?\n"
+                              "폴더 %s 안의 항차도 함께 옮깁니다(같은 항차는 건너뜁니다)."
+                              % (code, code), justify="left").pack(anchor="w")
+        var = tk.StringVar(win, choices[0])
+        ttk.Combobox(frame, textvariable=var, state="readonly",
+                     values=choices, width=40).pack(anchor="w", pady=PAD)
+        bar = ttk.Frame(frame)
+        bar.pack(anchor="e")
+
+        def do_link():
+            picked = (var.get() or "").split("—")[0].strip()
+            try:
+                win.destroy()
+            except Exception as exc:
+                core.log("정본 연결 창을 닫지 못했습니다: %s" % exc)
+            self.link_master_now(code, picked)
+
+        ttk.Button(bar, text="연결", command=do_link).pack(side="left", padx=PAD)
+        ttk.Button(bar, text="취소", command=win.destroy).pack(side="left")
+        return win
+
+    def link_master_now(self, old_code, new_code):
+        """미확인 항목을 정본 코드로 병합 — 캐시·폴더·서버까지(이관 함수 그대로 쓴다)."""
+        item = core.master_by_code(self.vessel_master, new_code)
+        if item is None:
+            core.log("정본 연결 실패 — 정본표에 없는 코드입니다: %s" % new_code)
+            return None
+        root_dir = self.var_root.get().strip()
+        out = core.merge_vessel(root_dir, self.cache, old_code, new_code, item["name"],
+                                firebase=self._firebase_or_none())
+        core.save_cache(self.cache, self.cache_path)
+        self._render_vessels()
+        note = ("정본 연결 — %s → %s(%s) · 폴더 이동 %d건 · 건너뜀 %d건 · 실패 %d건"
+                % (old_code, new_code, item["name"],
+                   len(out["moved"]), len(out["skipped"]), out["errors"]))
+        core.log(note)
+        self.var_status.set(note)
+        return out
+
+    def on_delete_vessel(self, code):
+        """미확인 항목을 목록에서 뺀다 — 폴더·파일은 그대로 둔다(확인창 먼저)."""
+        ok = messagebox.askyesno(
+            "항목 삭제",
+            "선박 목록에서 %s 를 지웁니다.\n\n"
+            "· 메일박스의 %s 폴더와 파일은 그대로 둡니다.\n"
+            "· 서버(vessels/%s) 노드는 지웁니다.\n"
+            "· 같은 이름이 또 들어오면 다시 나타납니다.\n\n진행할까요?" % (code, code, code))
+        if not ok:
+            return None
+        return self.delete_vessel_now(code)
+
+    def delete_vessel_now(self, code):
+        core.forget_vessel(self.cache, code)
+        core.save_cache(self.cache, self.cache_path)
+        self._render_vessels()
+        fb = self._firebase_or_none()
+        if fb is not None:
+            fb.delete("vessels/%s" % code)            # 실패는 core 쪽에서 로그로 드러난다
+        core.log("선박 항목 삭제 — %s (메일박스 폴더는 그대로 둡니다)" % code)
+        return True
+
+    def on_import_master(self):
+        """정본표(json) 파일을 골라 자리에 놓고 곧바로 이관까지 돌린다."""
+        path = filedialog.askopenfilename(
+            title="선박 정본표(json) 선택",
+            filetypes=[("JSON 파일", "*.json"), ("모든 파일", "*.*")])
+        if not path:
+            return None
+        return self.import_master_now(path)
+
+    def import_master_now(self, path):
+        items = core.load_master(path)
+        if not items:
+            messagebox.showwarning("정본표 가져오기",
+                                   "선박 정본표를 읽지 못했습니다(형식 확인): %s" % path)
+            return None
+        try:
+            if os.path.abspath(path) != os.path.abspath(self.master_path):
+                shutil.copyfile(path, self.master_path)
+        except OSError as exc:
+            core.log("정본표를 자리에 놓지 못했습니다: %s" % exc)
+            messagebox.showerror("정본표 가져오기", "파일을 복사하지 못했습니다: %s" % exc)
+            return None
+        self.vessel_master = core.load_master(self.master_path)
+        core.log("선박 정본표를 등록했습니다 — %d척 (%s)" % (len(self.vessel_master), self.master_path))
+        result = core.migrate_to_master(self.var_root.get().strip(), self.cache,
+                                        self.vessel_master, firebase=self._firebase_or_none())
+        core.save_cache(self.cache, self.cache_path)
+        self._render_vessels()
+        note = ("정본 %d척 · 코드 이관 %d건 · 폴더 이동 %d건 · 건너뜀 %d건 · 실패 %d건"
+                % (len(self.vessel_master), len(result["plan"]), len(result["moved"]),
+                   len(result["skipped"]), result["errors"]))
+        self.var_status.set("정본표 가져오기 완료 — " + note)
+        messagebox.showinfo("정본표 가져오기", note)
+        return result
 
     def organize_message(self):
         """폴더 정리 확인창 문구 — 무엇이 어디로 가는지 먼저 보여 준다."""
@@ -458,7 +610,8 @@ class MailPilotGUI:
         cfg = self.on_save(announce=not self._autostarting)
         if not cfg:
             return
-        self.collector = core.Collector(cfg, cache_path=self.cache_path)
+        self.collector = core.Collector(cfg, cache_path=self.cache_path,
+                                        master_path=self.master_path)
         # 캐시를 '같은 딕셔너리'로 묶는다 — 수집 중에 체크를 켜고 꺼도 다음 메일부터 곧바로 반영된다
         for key in ("names", "codes", "tally"):
             merged = dict((self.collector.cache.get(key) or {}))

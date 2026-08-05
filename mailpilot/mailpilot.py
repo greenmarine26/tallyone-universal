@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.3 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 자동 판독 → 폴더 적재 → 파이어베이스 등록)
+# 메일파일럿 Uni 0.4 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 판독 → 폴더 적재 → 파이어베이스 등록)
 # ⚠ 보안: config.json 에 메일 비밀번호가 평문으로 저장된다. 개인 PC 전용이며 공용 PC에서 쓰지 않는다.
 #   (MVP 한계 — 다음 판에서 암호화 예정. config.json 은 절대 커밋하지 않는다.)
 """메일파일럿 Uni — 사전(선박 목록) 없이 메일에서 선박·항차를 스스로 읽어내는 범용 수집기.
@@ -12,7 +12,8 @@
      · POP3: UIDL 목록 중 캐시(pop_uidl_cache.json)에 없는 것만 내려받는다.
              서버의 메일은 절대 지우지 않는다(DELE 금지 — 원본 보존).
   3) 제목 → 첨부파일명 순으로 항차 토큰(예: 2630W, V.535E, R083W)을 찾고
-     그 앞의 영문 대문자 낱말에서 선박명을 뽑아 4자 선박코드를 만든다
+     선박은 ① 정본표(vessels_master.json)에 걸리면 그 코드·정식명을 그대로 쓰고
+            ② 걸리지 않으면 항차 앞의 영문 대문자 낱말에서 이름을 뽑아 4자 코드를 만든다
   4) {mailbox_root}/{선박코드}/{항차}/{첨부파일명} 으로 적재
      판독 실패 메일은 {mailbox_root}/_미분류/{날짜}_{제목요약}/ 로 — 절대 버리지 않는다
      검수 대상 체크를 끈 선박은 {mailbox_root}/_기타/{선박코드}/{항차}/ 로 — 발견 기록은 그대로 남는다
@@ -40,11 +41,12 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-VERSION = "MailPilot Uni 0.3"
+VERSION = "MailPilot Uni 0.4"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 CACHE_PATH = os.path.join(HERE, "vessels_cache.json")
+MASTER_PATH = os.path.join(HERE, "vessels_master.json")   # 선박 정본표(테넌트 데이터 — 커밋하지 않는다)
 UIDL_CACHE_PATH = os.path.join(HERE, "pop_uidl_cache.json")
 LOG_DIR = os.path.join(HERE, "logs")
 
@@ -502,9 +504,156 @@ def vessel_code(name, cache):
     return candidate
 
 
-def read_mail_target(subject, filenames=None, cache=None):
-    """메일 한 통의 적재 대상 판독 — 제목 먼저, 실패하면 첨부파일명 순."""
+# ──────────────────────────── 선박 정본표(마스터) ────────────────────────────
+#
+# 정본표는 현장에서 쓰는 선박 등록 파일과 같은 모양이다(읽기 전용으로 받아 온다).
+#   [{"code": "XTPG", "name": "XIN TAI PING", "aliases": ["XTP"], "ko": ["일조국제물류"]}, ...]
+#   · code    현장이 쓰는 4자 정본 코드 — 자동 생성 코드보다 언제나 우선한다
+#   · name    정식 선박명(폴더 이름은 코드, 서버에 남는 이름은 이 정식명)
+#   · aliases 영문 별칭 — 제목·첨부명에 '낱말'로 나오면 그 배
+#   · ko      한글·중국어 발신 별칭 — 낱말 경계가 없는 언어라 부분 문자열로 본다
+# 정본표가 없으면(빈 목록) 0.3 과 완전히 같게 동작한다 — 제품은 빈 깡통으로 시작한다.
+
+# 별칭·코드 뒤에 항차가 그대로 붙어 오는 형태를 받아 준다(XTPG0535E · R063W).
+_MASTER_GLUE = r"(?:\d{2,5}[EWNS]|[EWNS])(?![A-Z0-9])"
+
+
+def load_master(path=None):
+    """정본표를 읽는다. 파일이 없거나 깨졌으면 빈 목록(자동 생성 경로만 쓴다)."""
+    path = path or MASTER_PATH
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log("선박 정본표를 읽지 못했습니다(%s): %s" % (path, exc))
+        return []
+    if not isinstance(data, list):
+        log("선박 정본표 형식이 목록이 아닙니다(무시): %s" % path)
+        return []
+    out = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "").strip().upper()
+        if not code:
+            continue
+        name = " ".join(str(item.get("name") or code).upper().split())
+        aliases = [str(a).strip().upper() for a in (item.get("aliases") or []) if str(a).strip()]
+        ko = [str(k).strip() for k in (item.get("ko") or []) if str(k).strip()]
+        out.append({"code": code, "name": name, "aliases": aliases, "ko": ko})
+    return out
+
+
+def master_by_code(master, code):
+    """코드로 정본 한 척을 찾는다. 없으면 None."""
+    want = (code or "").strip().upper()
+    for item in (master or []):
+        if item["code"] == want:
+            return item
+    return None
+
+
+def _master_word_hit(token, text_up):
+    """영문 토큰이 '낱말'로 들어 있는가(다른 낱말의 앞부분에 걸리면 안 된다)."""
+    if not token:
+        return False
+    return bool(re.search(r"(?<![A-Z0-9])" + re.escape(token) + r"(?![A-Z0-9])", text_up))
+
+
+def _master_glued_hit(token, text_up):
+    """영문 토큰 바로 뒤에 항차가 붙어 있는가(XTPG0535E · R063W)."""
+    if not token:
+        return False
+    return bool(re.search(r"(?<![A-Z0-9])" + re.escape(token) + r"(?=" + _MASTER_GLUE + r")", text_up))
+
+
+def _master_hit_len(item, text_up, text_raw):
+    """이 정본이 이 글에 걸리는 '가장 긴 매칭 문자열'의 길이. 0이면 안 걸림."""
+    best = 0
+    for ko in item.get("ko") or []:                  # ㉮ 한글·중국어 별칭 — 부분 문자열
+        if ko and ko in text_raw and len(ko) > best:
+            best = len(ko)
+    name = item.get("name") or ""                    # ㉯ 정식 선박명 — 낱말 경계
+    if len(name) > best and _master_word_hit(name, text_up):
+        best = len(name)
+    for alias in item.get("aliases") or []:          # ㉯ 영문 별칭 — 낱말 경계 또는 항차 붙음
+        if len(alias) > best and (_master_word_hit(alias, text_up)
+                                  or _master_glued_hit(alias, text_up)):
+            best = len(alias)
+    code = item["code"]                              # 코드는 '항차가 붙은 형태'만 여기서 잡는다.
+    # (코드가 낱말 하나로 떨어져 있는 경우는 자동 경로 끝의 귀속 규칙이 처리한다 —
+    #  'UNDELIVERABLE ATPR' 같은 반송 메일 제목이 통째로 그 배로 빨려 들어가는 것을 막는다.)
+    if len(code) > best and _master_glued_hit(code, text_up):
+        best = len(code)
+    return best
+
+
+def match_master(text_raw, master):
+    """원문(괄호 마스킹 전!)에서 정본 선박을 찾는다. 못 찾거나 모호하면 None.
+
+    ㉮ ko 별칭은 부분 문자열, ㉯ 정식명·영문 별칭은 낱말 경계로 본다.
+    여러 정본이 함께 걸리면 매칭 문자열이 가장 긴 하나. 완전 동률이면 모호로 보고 실패시킨다.
+    """
+    if not text_raw or not master:
+        return None
+    raw = str(text_raw)
+    text_up = raw.upper().translate(_SEP_TABLE)      # 구분자만 공백으로(길이 보존)
+    best_item, best_len, tie = None, 0, False
+    for item in master:
+        hit = _master_hit_len(item, text_up, raw)
+        if hit > best_len:
+            best_item, best_len, tie = item, hit, False
+        elif hit and hit == best_len and item is not best_item:
+            tie = True                               # 서로 다른 정본이 같은 길이로 걸림 → 병합 금지
+    if tie or not best_item:
+        return None
+    return best_item
+
+
+def master_code_for_name(name, master):
+    """자동으로 뽑은 선박명을 정본에 귀속한다(코드 완전 일치 · 정식명의 낱말 경계 끝부분).
+
+    예) 'TAI PING' → 'XIN TAI PING'(XTPG) · 'TNJP' → 코드 TNJP.
+    여러 정본에 걸리면 귀속을 포기한다(모호 병합 금지).
+    """
+    key = " ".join((name or "").upper().split())
+    if not key or not master:
+        return None
+    for item in master:
+        if key == item["code"]:
+            return item
+    hits = []
+    for item in master:
+        full = item.get("name") or ""
+        if full and (full == key or full.endswith(" " + key)):
+            hits.append(item)
+    return hits[0] if len(hits) == 1 else None
+
+
+def resolve_master(text, master):
+    """정본 판정 한 묶음 — 원문 매칭 먼저, 실패하면 이름 귀속. 판독과 이관이 같이 쓴다."""
+    return match_master(text, master) or master_code_for_name(text, master)
+
+
+def adopt_master(cache, item):
+    """정본으로 확정된 배를 캐시에 심는다(선박 목록·폴더 정리가 이 코드를 알아보도록)."""
+    if cache is None or not item:
+        return None
+    cache.setdefault("names", {})[item["name"]] = item["code"]
+    cache.setdefault("codes", {})[item["code"]] = item["name"]
+    return item["code"]
+
+
+def read_mail_target(subject, filenames=None, cache=None, master=None):
+    """메일 한 통의 적재 대상 판독 — 제목 먼저, 실패하면 첨부파일명 순.
+
+    선박은 정본표가 먼저다. 정본에 걸리면 코드를 자동 생성하지 않고 정본 코드·정식명을 쓴다.
+    항차 판독 규칙은 그대로다 — 정본에 걸려도 항차가 없으면 종전대로 미분류로 간다.
+    """
     cache = cache if cache is not None else {"names": {}, "codes": {}}
+    master = master or []
     sources = [("제목", subject or "")]
     for name in (filenames or []):
         sources.append(("첨부", name))
@@ -512,9 +661,23 @@ def read_mail_target(subject, filenames=None, cache=None):
         voyage, pos = find_voyage(text)
         if not voyage:
             continue
-        vessel = extract_vessel_name(text, pos)
+        item = match_master(text, master)            # ① 정본 우선(원문 그대로 본다)
+        if item:
+            adopt_master(cache, item)
+            return {
+                "ok": True, "vessel": item["name"], "voyage": voyage,
+                "code": item["code"], "source": where, "reason": "",
+            }
+        vessel = extract_vessel_name(text, pos)      # ② 기존 자동 경로
         if not vessel:
             continue
+        owner = master_code_for_name(vessel, master)  # 자동 이름도 마지막에 정본에 귀속해 본다
+        if owner:
+            adopt_master(cache, owner)
+            return {
+                "ok": True, "vessel": owner["name"], "voyage": voyage,
+                "code": owner["code"], "source": where, "reason": "",
+            }
         return {
             "ok": True, "vessel": vessel, "voyage": voyage,
             "code": vessel_code(vessel, cache), "source": where,
@@ -666,6 +829,119 @@ def organize_folders(root, cache, log_dir=None):
 
     log("폴더 정리 완료 — 이동 %d건 · 건너뜀 %d건" % (len(moved), len(skipped)), log_dir)
     return moved, skipped
+
+
+# ──────────────────────────── 정본 이관(자동 코드 → 정본 코드) ────────────────────────────
+#
+# 원칙은 폴더 정리와 같다 — 옮기기만 한다. 지우지도 덮어쓰지도 않는다.
+#   · 캐시   : 옛 코드를 가리키던 이름들을 정본 코드로 갈아끼우고, 옛 코드는 codes 에서 뺀다
+#   · 체크   : 옛 코드에 '끔(False)'이 있었으면 반드시 이월한다(모르는 새 눈 뜨지 않게)
+#   · 폴더   : {root}/{옛코드} → {root}/{정본코드}, {root}/_기타/{옛코드} → {root}/_기타/{정본코드}
+#              같은 항차가 양쪽에 있으면 그 항차는 건너뛴다(_move_tree 규칙 그대로)
+#   · 서버   : vessels/{정본코드} 를 채우고, 성공하면 vessels/{옛코드} 노드를 지운다
+
+def forget_vessel(cache, code):
+    """선박 목록에서 항목 하나를 지운다(캐시에서만 — 폴더·파일은 건드리지 않는다)."""
+    if cache is None or not code:
+        return False
+    names = cache.setdefault("names", {})
+    hit = False
+    for key in [k for k, v in names.items() if v == code]:
+        names.pop(key, None)
+        hit = True
+    if cache.setdefault("codes", {}).pop(code, None) is not None:
+        hit = True
+    cache.setdefault("tally", {}).pop(code, None)
+    return hit
+
+
+def merge_vessel(root, cache, old_code, new_code, official_name=None,
+                 log_dir=None, firebase=None):
+    """옛 코드를 정본 코드로 합친다 — 캐시·폴더·서버를 한꺼번에. (이관과 GUI 가 함께 쓴다)
+
+    돌려주는 값: {"moved": [(원본, 대상)], "skipped": [...], "errors": 정수}
+    """
+    out = {"moved": [], "skipped": [], "errors": 0}
+    if not old_code or not new_code or old_code == new_code or cache is None:
+        return out
+    names = cache.setdefault("names", {})
+    codes = cache.setdefault("codes", {})
+    tally = cache.setdefault("tally", {})
+
+    for key in [k for k, v in names.items() if v == old_code]:
+        names[key] = new_code
+    codes[new_code] = official_name or codes.get(new_code) or new_code
+    if not any(v == old_code for v in names.values()):
+        codes.pop(old_code, None)
+    if old_code in tally:                            # 검수 대상 체크 이월(끔은 무조건 보존)
+        was_on = bool(tally.pop(old_code))
+        if not was_on:
+            tally[new_code] = False
+        elif new_code not in tally:
+            tally[new_code] = True
+
+    if root and os.path.isdir(root):
+        for base in (root, os.path.join(root, OTHER_DIR)):
+            src = os.path.join(base, old_code)
+            if not os.path.isdir(src):
+                continue
+            try:
+                _move_tree(src, os.path.join(base, new_code), out["moved"], out["skipped"], log_dir)
+            except OSError as exc:
+                out["errors"] += 1
+                log("정본 이관 — 폴더를 옮기지 못했습니다(그대로 둡니다): %s (%s)" % (src, exc), log_dir)
+
+    if firebase is not None and getattr(firebase, "enabled", False):
+        res = firebase.register_vessel(new_code, codes.get(new_code) or new_code,
+                                       tally=tally_enabled(cache, new_code))
+        if res is None:
+            out["errors"] += 1
+            log("정본 이관 — 서버 등록 실패(옛 노드는 그대로 둡니다): %s → %s"
+                % (old_code, new_code), log_dir)
+        else:
+            firebase.delete("vessels/%s" % old_code)
+            left = firebase.get("vessels/%s" % old_code)
+            if left:
+                out["errors"] += 1
+                log("정본 이관 — 서버의 옛 노드가 남아 있습니다: vessels/%s" % old_code, log_dir)
+            else:
+                log("정본 이관 — 서버 노드 정리: vessels/%s 삭제 · vessels/%s 등록"
+                    % (old_code, new_code), log_dir)
+    return out
+
+
+def migrate_to_master(root, cache, master, log_dir=None, firebase=None):
+    """기동 시 한 번 — 캐시에 쌓인 자동 코드를 정본 코드로 모은다. 여러 번 돌려도 안전(멱등)."""
+    result = {"plan": [], "moved": [], "skipped": [], "errors": 0, "unmatched": []}
+    if cache is None:
+        return result
+    if not master:
+        log("선박 정본표가 없어 이관을 건너뜁니다 — 자동 생성 코드를 그대로 씁니다.", log_dir)
+        return result
+    names = cache.setdefault("names", {})
+    codes = cache.setdefault("codes", {})
+    plan = []
+    for name, old in sorted(names.items()):
+        item = resolve_master(name, master)
+        if not item:
+            result["unmatched"].append((name, old))
+            continue
+        if item["code"] == old:
+            codes[old] = item["name"]                # 이미 정본 코드 — 정식명만 맞춰 둔다
+            continue
+        plan.append((name, old, item))
+    for name, old, item in plan:
+        log("정본 이관 — %s(%s) → %s(%s)" % (name, old, item["code"], item["name"]), log_dir)
+        out = merge_vessel(root, cache, old, item["code"], item["name"], log_dir, firebase)
+        result["plan"].append({"name": name, "old": old,
+                               "new": item["code"], "official": item["name"]})
+        result["moved"].extend(out["moved"])
+        result["skipped"].extend(out["skipped"])
+        result["errors"] += out["errors"]
+    log("정본 이관 완료 — 코드 %d건 · 폴더 이동 %d건 · 건너뜀 %d건 · 실패 %d건 · 미확인 %d척"
+        % (len(result["plan"]), len(result["moved"]), len(result["skipped"]),
+           result["errors"], len(result["unmatched"])), log_dir)
+    return result
 
 
 # ──────────────────────────── 메일 해석 ────────────────────────────
@@ -1027,19 +1303,39 @@ class Collector:
     """수집 루프 — run_cycle() 한 사이클, start()/stop() 로 주기 실행."""
 
     def __init__(self, cfg, imap_factory=None, firebase=None,
-                 cache_path=None, log_dir=None, pop_factory=None, uidl_cache_path=None):
+                 cache_path=None, log_dir=None, pop_factory=None, uidl_cache_path=None,
+                 master_path=None):
         self.cfg = cfg or {}
         self.imap_factory = imap_factory
         self.pop_factory = pop_factory
         self.cache_path = cache_path or CACHE_PATH
         self.uidl_cache_path = uidl_cache_path or UIDL_CACHE_PATH
+        self.master_path = master_path or MASTER_PATH
         self.log_dir = log_dir or LOG_DIR
         self.cache = load_cache(self.cache_path)
+        self.master = load_master(self.master_path)
+        self._migrated = False                       # 기동 후 첫 사이클 직전에 한 번만 이관
         self.uidl_cache = load_uidl_cache(self.uidl_cache_path)
         self.firebase = firebase if firebase is not None else FirebaseREST(self.cfg.get("firebase"))
         self._stop = threading.Event()
         self._thread = None
         self.last_summary = None
+
+    # ── 기동 시 1회 이관 ──
+    def migrate_once(self, root):
+        """첫 사이클 직전에 한 번 — 자동 코드로 쌓인 캐시·폴더·서버 노드를 정본 코드로 모은다."""
+        if self._migrated:
+            return None
+        self._migrated = True
+        if not self.master:
+            log("선박 정본표(vessels_master.json)가 없습니다 — 자동 생성 코드로 그대로 갑니다.",
+                self.log_dir)
+            return None
+        log("선박 정본표 %d척을 읽었습니다 — 이관을 확인합니다." % len(self.master), self.log_dir)
+        result = migrate_to_master(root, self.cache, self.master,
+                                   log_dir=self.log_dir, firebase=self.firebase)
+        save_cache(self.cache, self.cache_path)
+        return result
 
     # ── 한 사이클 ──
     def run_cycle(self):
@@ -1048,8 +1344,9 @@ class Collector:
             log("메일박스 폴더가 설정되지 않았습니다 — 수집을 중단합니다.", self.log_dir)
             return {"error": "mailbox_root 없음"}
         os.makedirs(root, exist_ok=True)
+        self.migrate_once(root)
 
-        summary = {"at": _now_iso(), "mails": 0, "files": 0, "skipped": 0,
+        summary ={"at": _now_iso(), "mails": 0, "files": 0, "skipped": 0,
                    "unclassified": 0, "old_skipped": 0, "vessels": [], "errors": 0}
 
         protocol = cfg_protocol(self.cfg)
@@ -1175,7 +1472,7 @@ class Collector:
         if not attachments:
             return
         names = [n for n, _ in attachments]
-        target = read_mail_target(subject, names, self.cache)
+        target = read_mail_target(subject, names, self.cache, self.master)
         if target["ok"]:
             if tally_enabled(self.cache, target["code"]):
                 subdirs = [target["code"], target["voyage"]]
