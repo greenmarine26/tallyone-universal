@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.5';   // 마법사 터미널 목록 입력 + 설치 안내서
+export const APP_VERSION = 'TallyUni 0.6';   // QR 원터치 접속 — 링크(?cfg=)로 접속 설정 자동 완료
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가

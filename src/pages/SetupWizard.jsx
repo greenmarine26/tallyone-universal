@@ -9,27 +9,17 @@
 //   이 경로에서는 staffList를 건드리지 않는다 — 두 번째 기기가 기존 소유자의 직책을 덮어쓰면 안 되기 때문.
 // TallyUni 0.5: 2단계에서 터미널 목록을 받는다. 그 전까지 터미널은 tenant.js 기본값(PCTC·PNCT)에
 //   묶여 있어, 다른 항만 회사가 마법사를 마쳐도 PORT-MIS 화면에 평택 부두 이름이 나왔다.
+// TallyUni 0.6: QR 링크(?cfg=)로 접속 설정이 먼저 들어올 수 있다 — 그 결과를 첫 렌더에서 읽는다.
+//   관용 파서·보조 앱(FB_KEYS·FB_REQUIRED·parseFirebaseConfig·withWizardApp) 정의는 linkCfg.js로 옮겼다.
+//   부팅 게이트(main.jsx)가 마법사보다 먼저 그것들을 써야 해서다 — 내용·동작은 0.5와 같다.
 import React, { useState } from 'react';
 import { Anchor, Database, Building2, UserCog, Check, AlertCircle, Image as ImageIcon } from 'lucide-react';
 import { SK } from '../utils.js';
 import { TENANT_DEFAULTS } from '../tenant.js';
+import { FB_KEYS, FB_REQUIRED, parseFirebaseConfig, withWizardApp, getLinkBoot } from '../linkCfg.js';
 
-// Firebase 콘솔이 주는 스니펫을 관용적으로 읽는다.
-//   `const firebaseConfig = { apiKey: "...", ... };` (JS 객체 리터럴, 키 따옴표 없음)
-//   `{ "apiKey": "...", ... }` (JSON, 키 따옴표 있음)
-//   둘 다 같은 정규식으로 값만 뽑는다 — JSON.parse에 기대면 JS 리터럴에서 실패한다.
-export const FB_KEYS = ['apiKey', 'authDomain', 'databaseURL', 'projectId', 'storageBucket', 'messagingSenderId', 'appId', 'measurementId'];
-export const FB_REQUIRED = ['apiKey', 'databaseURL', 'projectId'];
-
-export function parseFirebaseConfig(text) {
-  const src = String(text || '');
-  const out = {};
-  for (const k of FB_KEYS) {
-    const m = src.match(new RegExp('["\']?' + k + '["\']?\\s*[:=]\\s*["\']([^"\']*)["\']'));
-    if (m && m[1]) out[k] = m[1].trim();
-  }
-  return out;
-}
+// 옛 import 경로(SetupWizard.jsx)를 그대로 두기 위한 재수출 — 단일 소스는 linkCfg.js다.
+export { FB_KEYS, FB_REQUIRED, parseFirebaseConfig, withWizardApp };
 
 /** 모항 코드(UN/LOCODE 5자)에서 별칭 후보를 만든다. KRPTK → ['KRPTK','PTK'] */
 export function homePortAliasesFor(code) {
@@ -92,35 +82,19 @@ function shrinkLogo(file) {
   });
 }
 
-// TallyUni 0.3: 마법사 보조 앱 — 기본 앱(firebase.js)은 설정이 없어 초기화되지 않았으므로(db=null)
-//   입력받은 설정으로 잠깐 별도 앱을 띄워 서버를 읽고 쓴다. 보안 규칙 `auth != null` 때문에 익명 로그인 필수.
-// TallyUni 0.4: 쓰고 나면 반드시 정리한다(signOut + deleteApp).
-//   왜: 정리하지 않으면 이 익명 UID 세션이 살아 있는 채로 location.reload()가 돌고, 리로드 뒤 기본 앱이
-//   따로 익명 로그인을 하면서 쓰다 버린 UID가 프로젝트에 계속 쌓인다. 이름도 매번 새로 만든다 —
-//   같은 이름으로 다시 initializeApp하면 (설정을 고쳐 다시 시도한 경우) 옵션 불일치로 던진다.
-export async function withWizardApp(cfg, fn) {
-  const { initializeApp, deleteApp } = await import('firebase/app');
-  const { getAuth, signInAnonymously, signOut } = await import('firebase/auth');
-  const wApp = initializeApp(cfg, `wizard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  const wAuth = getAuth(wApp);
-  try {
-    await signInAnonymously(wAuth);
-    return await fn(wApp);
-  } finally {
-    // 정리 실패가 본 작업을 되돌리면 안 된다 — 사유만 남기고 넘어간다(조용한 실패 금지).
-    try { await signOut(wAuth); } catch (e) { console.warn('[wizard] signOut 실패(무시)', e); }
-    try { await deleteApp(wApp); } catch (e) { console.warn('[wizard] deleteApp 실패(무시)', e); }
-  }
-}
-
 const IN = 'w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-600 text-sm focus:outline-none focus:border-blue-600';
 const LB = 'block text-[12px] font-bold text-slate-400 mb-1';
 
 export default function SetupWizard() {
-  const [step, setStep] = useState(1);
-  const [raw, setRaw] = useState('');
-  const [cfg, setCfg] = useState(null);
-  const [cfgErr, setCfgErr] = useState('');
+  // TallyUni 0.6: 부팅 게이트(linkCfg.js)가 QR 링크에서 읽어 둔 결과.
+  //   step 2 = 설정은 링크로 받았으니 붙여넣기를 건너뛰고 회사 정보부터.
+  //   error   = 링크의 설정을 못 읽었다는 한국어 문구 → 1단계에 그대로 띄운다(조용한 실패 금지).
+  //   링크가 없던 종전 흐름에서는 step 0 · cfg null · error '' 라 아래 초기값이 0.5와 완전히 같다.
+  const lb = getLinkBoot();
+  const [step, setStep] = useState(lb.step === 2 ? 2 : 1);
+  const [raw, setRaw] = useState(lb.cfg ? JSON.stringify(lb.cfg, null, 2) : '');
+  const [cfg, setCfg] = useState(lb.cfg || null);
+  const [cfgErr, setCfgErr] = useState(lb.error || '');
 
   const [company, setCompany] = useState('');
   const [companyEn, setCompanyEn] = useState('');
