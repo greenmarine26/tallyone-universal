@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.1 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·파이어베이스·GUI를 전부 확인한다.
+# 메일파일럿 Uni 0.2 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
 """실행: python mailpilot/tests/run_tests.py
 
   1) 판독 유닛테스트 — 실제 유형 제목 12종 → 선박/항차/코드 표
@@ -7,12 +7,19 @@
   4) 가짜 IMAP 으로 수집 1사이클 — 폴더 구조·중복 스킵·미분류
   5) 파이어베이스 REST 목 — signUp → PATCH 순서·payload·auth 파라미터
   6) tkinter 가짜 모듈로 GUI 스모크(디스플레이 없이 생성·입력 수집 검증)
+  7) 가짜 POP3 수집 — 같은 픽스처 12종이 IMAP 과 똑같이 적재되는지(판독 경로 공용 증명),
+     UIDL 캐시 중복 0, DELE 호출 0, 연결 테스트(STAT+TOP)
+  8) collect_days 경계(오래된 메일 스킵 + 캐시 기록) · UIDL 미지원 폴백 · TOP 미지원
+  9) 설정 도우미(0.1 호환) · 프리셋 전환 시 GUI 자동값 · config protocol 저장/로드
 """
 
+import datetime
 import email.message
+import email.utils
 import io
 import json
 import os
+import poplib
 import shutil
 import sys
 import tempfile
@@ -64,13 +71,16 @@ FIXTURES = [
 ]
 
 
-def build_eml(subject, filenames, sender="ops@example.com", body=b"TEST-ATTACH-DATA"):
+def build_eml(subject, filenames, sender="ops@example.com", body=b"TEST-ATTACH-DATA",
+              date=None, msgid=None):
     """첨부가 든 .eml 원문(bytes) 생성."""
     msg = email.message.EmailMessage()
     msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = "tally@example.com"
-    msg["Date"] = "Tue, 04 Aug 2026 09:12:00 +0900"
+    msg["Date"] = date or "Tue, 04 Aug 2026 09:12:00 +0900"
+    if msgid:
+        msg["Message-ID"] = msgid
     msg.set_content("자료 송부합니다.")
     for name in filenames:
         msg.add_attachment(body + name.encode("utf-8"),
@@ -374,6 +384,7 @@ def _install_fake_tkinter():
     tk.Tk = FakeTk
     tk.StringVar = FakeVar
     tk.IntVar = FakeVar
+    tk.BooleanVar = FakeVar
     tk.Text = FakeText
     for const in ("END", "W", "E", "N", "S", "BOTH", "X", "Y", "LEFT", "RIGHT",
                   "TOP", "BOTTOM", "DISABLED", "NORMAL"):
@@ -381,7 +392,7 @@ def _install_fake_tkinter():
 
     ttk = types.ModuleType("tkinter.ttk")
     for widget in ("Frame", "Label", "Entry", "Button", "Combobox",
-                   "Scrollbar", "LabelFrame", "Notebook", "Checkbutton"):
+                   "Scrollbar", "LabelFrame", "Notebook", "Checkbutton", "Radiobutton"):
         setattr(ttk, widget, FakeWidget)
 
     filedialog = types.ModuleType("tkinter.filedialog")
@@ -445,6 +456,365 @@ def test_gui_smoke():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ────────────────────── 7) 가짜 POP3 수집 사이클 ──────────────────────
+
+class FakePOP3:
+    """poplib.POP3_SSL 대역 — 픽스처 .eml 을 UIDL/TOP/RETR 응답으로 준다.
+
+    DELE 는 호출되면 즉시 예외를 던진다(서버 메일을 지우는 코드가 생기면 테스트가 깨진다).
+    """
+
+    MESSAGES = []
+    UIDL_SUPPORTED = True
+    TOP_SUPPORTED = True
+    DELE_CALLS = []
+    INSTANCES = []
+
+    def __init__(self, host, port=995, timeout=None, context=None):
+        self.host, self.port, self.timeout = host, port, timeout
+        self.messages = list(FakePOP3.MESSAGES)
+        self.user_name = None
+        self.logged_in = False
+        self.retr_calls = []
+        self.top_calls = []
+        self.quit_called = False
+        FakePOP3.INSTANCES.append(self)
+
+    # ── 접속·인증 ──
+    def user(self, name):
+        self.user_name = name
+        return b"+OK"
+
+    def pass_(self, password):
+        if not self.user_name or not password:
+            raise poplib.error_proto(b"-ERR authentication failed")
+        self.logged_in = True
+        return b"+OK logged in"
+
+    # ── 목록 ──
+    def stat(self):
+        return (len(self.messages), sum(len(m) for m in self.messages))
+
+    def uidl(self, which=None):
+        if not FakePOP3.UIDL_SUPPORTED:
+            raise poplib.error_proto(b"-ERR unknown command")
+        lines = [("%d UID%04d" % (i + 1, i + 1)).encode() for i in range(len(self.messages))]
+        return (b"+OK", lines, sum(len(x) for x in lines))
+
+    @staticmethod
+    def _split_lines(raw):
+        return raw.replace(b"\r\n", b"\n").split(b"\n")
+
+    def top(self, num, lines=0):
+        if not FakePOP3.TOP_SUPPORTED:
+            raise poplib.error_proto(b"-ERR TOP not supported")
+        self.top_calls.append(num)
+        raw = self.messages[num - 1].replace(b"\r\n", b"\n")
+        head = raw.split(b"\n\n", 1)[0]
+        out = head.split(b"\n")
+        return (b"+OK", out, len(head))
+
+    def retr(self, num):
+        self.retr_calls.append(num)
+        raw = self.messages[num - 1]
+        out = FakePOP3._split_lines(raw)
+        return (b"+OK", out, len(raw))
+
+    def dele(self, num):
+        FakePOP3.DELE_CALLS.append(num)
+        raise AssertionError("DELE 호출 금지 — 서버 메일은 지우지 않는다")
+
+    def quit(self):
+        self.quit_called = True
+        return b"+OK"
+
+
+def _reset_pop(messages, uidl=True, top=True):
+    FakePOP3.MESSAGES = list(messages)
+    FakePOP3.UIDL_SUPPORTED = uidl
+    FakePOP3.TOP_SUPPORTED = top
+    FakePOP3.DELE_CALLS = []
+    FakePOP3.INSTANCES = []
+
+
+def _tree(root):
+    """{루트 기준 상대경로: 파일크기} — 두 경로의 적재 결과를 그대로 견주기 위한 지문."""
+    out = {}
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            full = os.path.join(base, name)
+            out[os.path.relpath(full, root).replace("\\", "/")] = os.path.getsize(full)
+    return out
+
+
+def _pop_cfg(root, tmp, days=7):
+    return {"provider": "whois", "protocol": "pop3", "host": "pop.test.local", "port": 995,
+            "ssl": True, "email": "office@test", "password": "pw", "mailbox_root": root,
+            "collect_days": days, "poll_minutes": 10, "firebase": {}}
+
+
+def _make_collector(cfg, tmp, tag):
+    col = core.Collector(cfg, pop_factory=FakePOP3, firebase=None,
+                         cache_path=os.path.join(tmp, "vessels_%s.json" % tag),
+                         log_dir=os.path.join(tmp, "logs"),
+                         uidl_cache_path=os.path.join(tmp, "pop_uidl_%s.json" % tag))
+    col.firebase = core.FirebaseREST({})
+    return col
+
+
+def test_pop3_cycle():
+    print("\n[7] 가짜 POP3 수집 — IMAP 과 같은 판독 파이프라인인지")
+    msgs = [build_eml(s, f) for s, f, _v, _y in FIXTURES]
+    tmp = tempfile.mkdtemp(prefix="mailpilot_pop_")
+    try:
+        # ① IMAP 경로 결과(기준표)
+        FakeIMAP.MESSAGES = list(msgs)
+        root_imap = os.path.join(tmp, "MB_IMAP")
+        cfg_imap = {"provider": "custom", "protocol": "imap", "host": "imap.test.local",
+                    "port": 993, "ssl": True, "email": "u@test", "password": "pw",
+                    "mailbox_root": root_imap, "collect_days": 7, "poll_minutes": 10,
+                    "firebase": {}}
+        col_i = core.Collector(cfg_imap, imap_factory=FakeIMAP, firebase=None,
+                               cache_path=os.path.join(tmp, "vessels_imap.json"),
+                               log_dir=os.path.join(tmp, "logs"))
+        col_i.firebase = core.FirebaseREST({})
+        s_imap = col_i.run_cycle()
+
+        # ② POP3 경로 결과
+        _reset_pop(msgs)
+        root_pop = os.path.join(tmp, "MB_POP")
+        col_p = _make_collector(_pop_cfg(root_pop, tmp), tmp, "pop")
+        s_pop = col_p.run_cycle()
+
+        check("POP3 로그인(아이디=메일주소 전체 / 비밀번호)",
+              FakePOP3.INSTANCES[0].logged_in
+              and FakePOP3.INSTANCES[0].user_name == "office@test",
+              "%s:%s" % (FakePOP3.INSTANCES[0].host, FakePOP3.INSTANCES[0].port))
+        check("프리셋 기본 포트 995 · SSL", FakePOP3.INSTANCES[0].port == 995)
+
+        same_counts = all(s_pop[k] == s_imap[k] for k in
+                          ("mails", "files", "skipped", "unclassified", "errors"))
+        check("POP3 사이클 요약 = IMAP 사이클 요약", same_counts,
+              "POP %s / IMAP %s"
+              % ({k: s_pop[k] for k in ("mails", "files", "unclassified", "errors")},
+                 {k: s_imap[k] for k in ("mails", "files", "unclassified", "errors")}))
+
+        t_imap, t_pop = _tree(root_imap), _tree(root_pop)
+        check("적재 결과 파일 트리 동일(같은 판독 파이프라인)", t_imap == t_pop,
+              "%d경로 일치" % len(t_pop) if t_imap == t_pop
+              else "IMAP만: %s / POP만: %s"
+                   % (sorted(set(t_imap) - set(t_pop))[:3], sorted(set(t_pop) - set(t_imap))[:3]))
+
+        check("POP3 도 미분류 3건 보존", s_pop["unclassified"] == 3, str(s_pop["unclassified"]))
+        check("1사이클 RETR = 메일 수", len(FakePOP3.INSTANCES[0].retr_calls) == 12,
+              "%d회" % len(FakePOP3.INSTANCES[0].retr_calls))
+
+        # ③ 2사이클 — UIDL 캐시로 중복 0
+        s_pop2 = col_p.run_cycle()
+        second = FakePOP3.INSTANCES[1]
+        check("2사이클 UIDL 캐시 중복 0(RETR 0회 · 저장 0 · 스킵 0)",
+              len(second.retr_calls) == 0 and s_pop2["mails"] == 0
+              and s_pop2["files"] == 0 and s_pop2["skipped"] == 0,
+              "RETR %d · 메일 %d · 저장 %d" % (len(second.retr_calls), s_pop2["mails"],
+                                              s_pop2["files"]))
+        cached = core.load_uidl_cache(os.path.join(tmp, "pop_uidl_pop.json"))
+        acct = core.account_key(_pop_cfg(root_pop, tmp))
+        check("UIDL 캐시 12건 저장", len(cached["accounts"].get(acct, {})) == 12,
+              "%d건 / 계정열쇠 %s" % (len(cached["accounts"].get(acct, {})), acct))
+
+        # ④ 새 계정 캐시가 새로 만들어진 콜렉터에서도 유지되는지(파일 기반)
+        col_p3 = _make_collector(_pop_cfg(root_pop, tmp), tmp, "pop")
+        s_pop3 = col_p3.run_cycle()
+        check("수집기를 새로 띄워도 다시 받지 않음",
+              len(FakePOP3.INSTANCES[2].retr_calls) == 0 and s_pop3["mails"] == 0)
+
+        check("DELE 호출 0(서버 메일 보존)", FakePOP3.DELE_CALLS == [], str(FakePOP3.DELE_CALLS))
+        check("QUIT 로 정상 종료", all(i.quit_called for i in FakePOP3.INSTANCES))
+
+        # ⑤ 서버에서 사라진 메일은 캐시에서도 정리
+        _reset_pop(msgs[:3])
+        col_p4 = _make_collector(_pop_cfg(root_pop, tmp), tmp, "pop")
+        col_p4.run_cycle()
+        cached2 = core.load_uidl_cache(os.path.join(tmp, "pop_uidl_pop.json"))
+        check("서버에서 사라진 UIDL 은 캐시에서 정리(무한 증가 방지)",
+              len(cached2["accounts"].get(acct, {})) == 3,
+              "%d건" % len(cached2["accounts"].get(acct, {})))
+
+        # ⑥ 연결 테스트 — 로그인 + STAT + 최근 3건 제목
+        _reset_pop(msgs)
+        ok, msg = core.test_pop3(_pop_cfg(root_pop, tmp), pop_factory=FakePOP3)
+        titles_ok = msg.count("\n  · ") == 3 and "메일 12통" in msg
+        check("연결 테스트(POP3) — 로그인+STAT+최근 3건 제목", ok and titles_ok,
+              msg.replace("\n", " | ")[:110])
+        ok_bad, msg_bad = core.test_pop3(dict(_pop_cfg(root_pop, tmp), password=""),
+                                         pop_factory=FakePOP3)
+        check("연결 테스트 실패는 사유를 돌려준다", not ok_bad and "POP3 접속 실패" in msg_bad,
+              msg_bad[:60])
+
+        ok_disp, _m = core.test_mail(_pop_cfg(root_pop, tmp), pop_factory=FakePOP3)
+        check("test_mail 이 protocol 에 맞는 경로를 고른다", ok_disp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 8) collect_days 경계 · UIDL/TOP 폴백 ──────────────────────
+
+def _rfc_date(days_ago):
+    when = datetime.datetime.now(datetime.timezone.utc).astimezone() - \
+        datetime.timedelta(days=days_ago)
+    return email.utils.format_datetime(when)
+
+
+def test_pop3_edges():
+    print("\n[8] collect_days 경계 · UIDL 미지원 폴백")
+    tmp = tempfile.mkdtemp(prefix="mailpilot_pop_edge_")
+    try:
+        fresh = build_eml("SAWASDEE DENIZ 2608S ACTUAL BAPLIE", ["SWDN_2608S_ACTUAL_BAPLIE.edi"],
+                          date=_rfc_date(1))
+        old = build_eml("ATLANTIC PARIS 2625E CNTR LIST 최종", ["ATPR 2625E CNTR LIST.xlsx"],
+                        date=_rfc_date(8))
+        _reset_pop([fresh, old])
+        root = os.path.join(tmp, "MB")
+        col = _make_collector(_pop_cfg(root, tmp, days=7), tmp, "edge")
+        s1 = col.run_cycle()
+        check("8일 전 메일은 내려받지 않는다(collect_days 7)",
+              s1["mails"] == 1 and s1["old_skipped"] == 1
+              and len(FakePOP3.INSTANCES[0].retr_calls) == 1,
+              "메일 %d · 오래됨 %d · RETR %d"
+              % (s1["mails"], s1["old_skipped"], len(FakePOP3.INSTANCES[0].retr_calls)))
+        check("경계 안 메일만 적재",
+              os.path.exists(os.path.join(root, "SWDN", "2608S", "SWDN_2608S_ACTUAL_BAPLIE.edi"))
+              and not os.path.exists(os.path.join(root, "ATPR")))
+        acct = core.account_key(_pop_cfg(root, tmp))
+        cached = core.load_uidl_cache(os.path.join(tmp, "pop_uidl_edge.json"))
+        check("스킵한 오래된 메일도 캐시에 기록(재RETR 방지)",
+              len(cached["accounts"].get(acct, {})) == 2,
+              "%d건" % len(cached["accounts"].get(acct, {})))
+        col.run_cycle()
+        check("2사이클에 오래된 메일 TOP·RETR 재요청 없음",
+              len(FakePOP3.INSTANCES[1].retr_calls) == 0
+              and len(FakePOP3.INSTANCES[1].top_calls) == 0,
+              "RETR %d · TOP %d" % (len(FakePOP3.INSTANCES[1].retr_calls),
+                                    len(FakePOP3.INSTANCES[1].top_calls)))
+
+        # UIDL 미지원 — Message-ID 해시 / 없으면 헤더 해시로 대신한다
+        with_id = build_eml("STAR MAJESTY 2643E & 2644W PTK TALLY REPORT",
+                            ["STMJ 2643E&2644W PTK TALLY REPORT.xlsx"],
+                            msgid="<abc-1@test.local>")
+        no_id = build_eml("TIANJIN PEARL V.26355W BAPLIE 송부",
+                          ["TNJP_26355W_ACTUAL_BAPLIE.edi"])
+        _reset_pop([with_id, no_id], uidl=False)
+        root2 = os.path.join(tmp, "MB2")
+        col2 = _make_collector(_pop_cfg(root2, tmp), tmp, "nouidl")
+        s2 = col2.run_cycle()
+        keys = sorted(core.load_uidl_cache(
+            os.path.join(tmp, "pop_uidl_nouidl.json"))["accounts"].get(
+                core.account_key(_pop_cfg(root2, tmp)), {}))
+        check("UIDL 미지원 서버도 2통 모두 적재", s2["mails"] == 2 and s2["files"] == 2,
+              "메일 %d · 저장 %d" % (s2["mails"], s2["files"]))
+        check("Message-ID 해시(m:) + 헤더 해시(h:) 로 열쇠 생성",
+              any(k.startswith("m:") for k in keys) and any(k.startswith("h:") for k in keys),
+              ", ".join(k[:10] for k in keys))
+        col2.run_cycle()
+        check("UIDL 미지원 서버에서도 2사이클 중복 0",
+              len(FakePOP3.INSTANCES[1].retr_calls) == 0)
+
+        # TOP 미지원 — 날짜로 거르지 못해도 조용히 죽지 않고 전부 받아 온다
+        _reset_pop([with_id, no_id], uidl=True, top=False)
+        root3 = os.path.join(tmp, "MB3")
+        col3 = _make_collector(_pop_cfg(root3, tmp), tmp, "notop")
+        s3 = col3.run_cycle()
+        check("TOP 미지원 서버에서도 수집 계속(오류 0)",
+              s3["mails"] == 2 and s3["errors"] == 0,
+              "메일 %d · 오류 %d" % (s3["mails"], s3["errors"]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 9) 설정 도우미 · 프리셋 전환 ──────────────────────
+
+def test_config_and_presets():
+    print("\n[9] 설정 도우미(0.1 호환) · 프리셋 전환 · protocol 저장/로드")
+    whois = core.PRESETS["whois"]
+    check("후이즈/회사메일 프리셋 = POP3 995 SSL",
+          whois["protocol"] == "pop3" and whois["host"] == "pop.whoisworks.com"
+          and whois["port"] == 995 and whois["ssl"] is True,
+          "%s %s:%s" % (whois["protocol"], whois["host"], whois["port"]))
+    check("기본 선택이 후이즈/회사메일",
+          core.PRESET_ORDER[0] == "whois" and core.DEFAULT_CONFIG["provider"] == "whois")
+    check("후이즈 안내문에 POP3 사용함·아이디 전체·웹메일 비밀번호",
+          all(k in whois["help"] for k in ("POP3", "메일주소 전체", "웹메일 로그인 비밀번호")))
+    check("네이버·한메일·지메일은 IMAP 유지",
+          all(core.PRESETS[k]["protocol"] == "imap" for k in ("naver", "daum", "gmail"))
+          and core.PRESETS["naver"]["host"] == "imap.naver.com")
+    check("gui/mailpilot 공용 PRESETS(중복 정의 없음)",
+          core.IMAP_PRESETS is core.PRESETS)
+
+    legacy = {"provider": "naver", "imap_host": "imap.naver.com", "imap_port": 993,
+              "email": "a@naver.com", "password": "pw"}
+    check("0.1 설정(imap_host/imap_port)도 그대로 읽는다",
+          core.cfg_protocol(legacy) == "imap" and core.cfg_host(legacy) == "imap.naver.com"
+          and core.cfg_port(legacy) == 993 and core.cfg_ssl(legacy) is True)
+    bare = {"provider": "whois", "email": "office@greenmarine.co.kr"}
+    check("프리셋만 있어도 서버·포트·방식을 채운다",
+          core.cfg_protocol(bare) == "pop3" and core.cfg_host(bare) == "pop.whoisworks.com"
+          and core.cfg_port(bare) == 995)
+    check("계정별 UIDL 캐시 열쇠 분리",
+          core.account_key(bare) != core.account_key(dict(bare, email="other@x")))
+
+    tmp = tempfile.mkdtemp(prefix="mailpilot_cfg_")
+    cfg_path = os.path.join(tmp, "config.json")
+    try:
+        import gui                                    # 6)에서 가짜 tkinter 가 이미 설치돼 있다
+        app = gui.MailPilotGUI(config_path=cfg_path)
+        check("설정 없는 첫 실행 = 후이즈/회사메일 자동 선택",
+              app.var_provider.get() == "후이즈/회사메일"
+              and app.var_protocol.get() == "pop3"
+              and app.var_host.get() == "pop.whoisworks.com"
+              and app.var_port.get() == "995" and app.var_ssl.get() is True,
+              "%s %s:%s" % (app.var_protocol.get(), app.var_host.get(), app.var_port.get()))
+
+        app.var_provider.set("네이버 메일")
+        app.on_provider_change()
+        check("프리셋 전환 → IMAP 993 자동",
+              app.var_protocol.get() == "imap" and app.var_host.get() == "imap.naver.com"
+              and app.var_port.get() == "993",
+              "%s %s:%s" % (app.var_protocol.get(), app.var_host.get(), app.var_port.get()))
+
+        app.var_provider.set("후이즈/회사메일")
+        app.on_provider_change()
+        check("되돌리면 POP3 995 로 복귀",
+              app.var_protocol.get() == "pop3" and app.var_port.get() == "995")
+
+        app.var_provider.set("직접 입력")
+        app.on_provider_change()
+        app.var_protocol.set("pop3")
+        app.on_protocol_change()
+        check("직접입력에서 방식 바꾸면 표준 포트 따라감(993→995)",
+              app.var_port.get() == "995", app.var_port.get())
+        app.var_host.set("mail.example.co.kr")
+
+        app.var_email.set("office@greenmarine.co.kr")
+        app.var_password.set("web-login-pw")
+        app.var_root.set(tmp)
+        cfg = app.collect_config()
+        check("collect_config 에 protocol/host/port/ssl + 0.1 거울값",
+              cfg["protocol"] == "pop3" and cfg["host"] == "mail.example.co.kr"
+              and cfg["port"] == 995 and cfg["ssl"] is True
+              and cfg["imap_host"] == cfg["host"] and cfg["imap_port"] == cfg["port"],
+              json.dumps({k: cfg[k] for k in ("provider", "protocol", "host", "port", "ssl")},
+                         ensure_ascii=False))
+        app.on_save()
+        loaded = core.load_config(cfg_path)
+        check("config protocol 저장/로드",
+              loaded["protocol"] == "pop3" and core.cfg_protocol(loaded) == "pop3"
+              and core.cfg_port(loaded) == 995)
+    except Exception as exc:
+        check("프리셋 전환 GUI", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -456,6 +826,9 @@ def main():
     test_collect_cycle()
     test_firebase_rest()
     test_gui_smoke()
+    test_pop3_cycle()
+    test_pop3_edges()
+    test_config_and_presets()
 
     failed = [name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

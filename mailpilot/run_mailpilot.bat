@@ -1,5 +1,5 @@
 @echo off
-REM MailPilot Uni 0.1 - launcher (finds python, runs the setup GUI)
+REM MailPilot Uni 0.2 - launcher (finds python, runs the setup GUI)
 setlocal
 cd /d "%~dp0"
 set PY=

@@ -12,3 +12,4 @@ mailpilot/vessels_cache.json
 mailpilot/logs/
 mailpilot/__pycache__/
 mailpilot/tests/__pycache__/
+mailpilot/pop_uidl_cache.json

@@ -1,12 +1,15 @@
-# 메일파일럿 Uni 0.1 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
+# 메일파일럿 Uni 0.2 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
 # ⚠ 보안: 여기서 입력한 비밀번호는 config.json 에 평문 저장된다. 개인 PC 전용, 공용 PC 금지.
 """tkinter 설정 창.
 
-  · 메일사 프리셋(네이버/한메일/지메일/직접입력) — 고르면 서버·포트 자동 입력
+  · 메일사 프리셋(후이즈/회사메일 · 네이버 · 한메일 · 지메일 · 직접입력)
+    — 고르면 방식(IMAP/POP3)·서버·포트·SSL 이 한꺼번에 채워진다. 기본은 후이즈/회사메일(POP3).
+  · 직접입력일 때만 방식·서버·포트·SSL 을 손으로 고칠 수 있다.
   · 이메일 / 비밀번호(*표시)
   · firebaseConfig 붙여넣기(앱 설정과 같은 값을 그대로 붙여넣으면 된다)
   · 메일박스 폴더 선택
-  · [연결 테스트] IMAP 로그인 + 폴더 수 + 최근 메일 3건 / 파이어베이스 익명 인증 + 시험 쓰기
+  · [연결 테스트] IMAP: 로그인+폴더 수+최근 3건 / POP3: 로그인+메일 수+최근 3건 제목
+                  · 파이어베이스 익명 인증 + 시험 쓰기
   · [저장] [수집 시작/중지] · 최근 로그 표시
 """
 
@@ -37,13 +40,17 @@ class MailPilotGUI:
         self.log_queue = queue.Queue()
 
         cfg = core.load_config(self.config_path) or dict(core.DEFAULT_CONFIG)
-        self.provider_labels = {k: v["label"] for k, v in core.IMAP_PRESETS.items()}
+        self.provider_labels = {k: v["label"] for k, v in core.PRESETS.items()}
         self.label_to_key = {v: k for k, v in self.provider_labels.items()}
 
+        default_provider = cfg.get("provider") or core.DEFAULT_CONFIG["provider"]
         self.var_provider = tk.StringVar(
-            self.master, self.provider_labels.get(cfg.get("provider", "naver"), "네이버 메일"))
-        self.var_host = tk.StringVar(self.master, cfg.get("imap_host", ""))
-        self.var_port = tk.StringVar(self.master, str(cfg.get("imap_port", 993)))
+            self.master,
+            self.provider_labels.get(default_provider, core.PRESETS["whois"]["label"]))
+        self.var_protocol = tk.StringVar(self.master, core.cfg_protocol(cfg))
+        self.var_ssl = tk.BooleanVar(self.master, core.cfg_ssl(cfg))
+        self.var_host = tk.StringVar(self.master, core.cfg_host(cfg))
+        self.var_port = tk.StringVar(self.master, str(core.cfg_port(cfg)))
         self.var_email = tk.StringVar(self.master, cfg.get("email", ""))
         self.var_password = tk.StringVar(self.master, cfg.get("password", ""))
         self.var_root = tk.StringVar(self.master, cfg.get("mailbox_root", ""))
@@ -66,25 +73,37 @@ class MailPilotGUI:
         ttk.Label(box1, text="메일사").grid(row=0, column=0, sticky="w")
         self.cmb_provider = ttk.Combobox(
             box1, textvariable=self.var_provider, state="readonly",
-            values=[core.IMAP_PRESETS[k]["label"] for k in ("naver", "daum", "gmail", "custom")],
-            width=14)
+            values=[core.PRESETS[k]["label"] for k in core.PRESET_ORDER],
+            width=16)
         self.cmb_provider.grid(row=0, column=1, sticky="w", padx=PAD)
         self.cmb_provider.bind("<<ComboboxSelected>>", self.on_provider_change)
 
-        ttk.Label(box1, text="IMAP 서버").grid(row=0, column=2, sticky="w")
-        ttk.Entry(box1, textvariable=self.var_host, width=24).grid(row=0, column=3, padx=PAD)
-        ttk.Label(box1, text="포트").grid(row=0, column=4, sticky="w")
-        ttk.Entry(box1, textvariable=self.var_port, width=6).grid(row=0, column=5, padx=PAD)
+        ttk.Label(box1, text="방식").grid(row=0, column=2, sticky="e")
+        self.rb_imap = ttk.Radiobutton(box1, text="IMAP", variable=self.var_protocol,
+                                       value="imap", command=self.on_protocol_change)
+        self.rb_imap.grid(row=0, column=3, sticky="w")
+        self.rb_pop3 = ttk.Radiobutton(box1, text="POP3", variable=self.var_protocol,
+                                       value="pop3", command=self.on_protocol_change)
+        self.rb_pop3.grid(row=0, column=4, sticky="w")
+        self.chk_ssl = ttk.Checkbutton(box1, text="SSL", variable=self.var_ssl)
+        self.chk_ssl.grid(row=0, column=5, sticky="w", padx=PAD)
 
-        ttk.Label(box1, text="이메일").grid(row=1, column=0, sticky="w", pady=PAD)
+        ttk.Label(box1, text="메일 서버").grid(row=1, column=0, sticky="w", pady=PAD)
+        self.ent_host = ttk.Entry(box1, textvariable=self.var_host, width=26)
+        self.ent_host.grid(row=1, column=1, columnspan=2, sticky="w", padx=PAD)
+        ttk.Label(box1, text="포트").grid(row=1, column=3, sticky="e")
+        self.ent_port = ttk.Entry(box1, textvariable=self.var_port, width=6)
+        self.ent_port.grid(row=1, column=4, sticky="w", padx=PAD)
+
+        ttk.Label(box1, text="이메일").grid(row=2, column=0, sticky="w", pady=PAD)
         ttk.Entry(box1, textvariable=self.var_email, width=30).grid(
-            row=1, column=1, columnspan=2, sticky="w", padx=PAD)
-        ttk.Label(box1, text="비밀번호").grid(row=1, column=3, sticky="e")
+            row=2, column=1, columnspan=2, sticky="w", padx=PAD)
+        ttk.Label(box1, text="비밀번호").grid(row=2, column=3, sticky="e")
         ttk.Entry(box1, textvariable=self.var_password, width=22, show="*").grid(
-            row=1, column=4, columnspan=2, sticky="w", padx=PAD)
+            row=2, column=4, columnspan=2, sticky="w", padx=PAD)
 
         self.lbl_help = ttk.Label(box1, text="", foreground="#555", justify="left")
-        self.lbl_help.grid(row=2, column=0, columnspan=6, sticky="w", pady=(PAD, 0))
+        self.lbl_help.grid(row=3, column=0, columnspan=6, sticky="w", pady=(PAD, 0))
 
         box2 = ttk.LabelFrame(root, text="2. 저장 위치 · 주기", padding=PAD)
         box2.pack(fill="x", pady=PAD)
@@ -129,12 +148,41 @@ class MailPilotGUI:
         return self.label_to_key.get(self.var_provider.get(), "custom")
 
     def on_provider_change(self, event=None):
+        """프리셋을 고르면 방식·서버·포트·SSL 을 한꺼번에 채운다(직접입력만 손으로 고친다)."""
         key = self.current_provider()
-        preset = core.IMAP_PRESETS.get(key, core.IMAP_PRESETS["custom"])
+        preset = core.PRESETS.get(key, core.PRESETS["custom"])
         if key != "custom":
+            self.var_protocol.set(preset.get("protocol", "imap"))
             self.var_host.set(preset["host"])
             self.var_port.set(str(preset["port"]))
+            self.var_ssl.set(bool(preset.get("ssl", True)))
         self.lbl_help.configure(text=preset["help"])
+        self._set_manual_fields(key == "custom")
+
+    def on_protocol_change(self, event=None):
+        """직접입력에서 방식만 바꿨을 때 표준 포트를 따라 준다(손으로 고친 값은 건드리지 않는다)."""
+        if self.current_provider() != "custom":
+            return
+        standard = {"imap": ("993", "143"), "pop3": ("995", "110")}
+        want = standard.get(self.var_protocol.get(), ("993", "143"))
+        other = standard["pop3"] if self.var_protocol.get() == "imap" else standard["imap"]
+        if self.var_port.get().strip() in other or not self.var_port.get().strip():
+            self.var_port.set(want[0] if self.var_ssl.get() else want[1])
+
+    def _set_manual_fields(self, editable):
+        """프리셋을 쓰면 서버·포트·방식 칸을 잠근다(오타로 접속이 막히는 일을 줄인다)."""
+        state = "normal" if editable else "readonly"
+        for widget in (self.ent_host, self.ent_port):
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+        btn_state = "normal" if editable else "disabled"
+        for widget in (self.rb_imap, self.rb_pop3, self.chk_ssl):
+            try:
+                widget.configure(state=btn_state)
+            except Exception:
+                pass
 
     def on_pick_folder(self):
         path = filedialog.askdirectory(title="메일박스 폴더 선택")
@@ -148,10 +196,18 @@ class MailPilotGUI:
                 return int(str(value).strip())
             except (TypeError, ValueError):
                 return default
+        host = self.var_host.get().strip()
+        protocol = (self.var_protocol.get() or "imap").strip().lower()
+        port = _int(self.var_port.get(), 995 if protocol == "pop3" else 993)
         return {
             "provider": self.current_provider(),
-            "imap_host": self.var_host.get().strip(),
-            "imap_port": _int(self.var_port.get(), 993),
+            "protocol": protocol,
+            "host": host,
+            "port": port,
+            "ssl": bool(self.var_ssl.get()),
+            # 0.1 호환 거울값 — 같은 값을 가리킨다(예전 설정을 읽는 도구가 있어도 깨지지 않게)
+            "imap_host": host,
+            "imap_port": port,
             "email": self.var_email.get().strip(),
             "password": self.var_password.get(),
             "mailbox_root": self.var_root.get().strip(),
@@ -182,15 +238,16 @@ class MailPilotGUI:
         threading.Thread(target=self._test_worker, args=(cfg,), daemon=True).start()
 
     def _test_worker(self, cfg):
-        ok_imap, msg_imap = core.test_imap(cfg)
-        core.log(msg_imap)
+        ok_mail, msg_mail = core.test_mail(cfg)
+        core.log(msg_mail)
         if cfg.get("firebase"):
             ok_fb, msg_fb = core.test_firebase(cfg["firebase"])
         else:
             ok_fb, msg_fb = False, "firebaseConfig 가 비어 있습니다(선택 사항이지만 넣어야 선박리스트가 앱에 뜹니다)."
         core.log(msg_fb)
-        self.var_status.set("테스트 완료 — 메일 %s · 파이어베이스 %s"
-                            % ("OK" if ok_imap else "실패", "OK" if ok_fb else "실패"))
+        self.var_status.set("테스트 완료 — 메일(%s) %s · 파이어베이스 %s"
+                            % (core.cfg_protocol(cfg).upper(),
+                               "OK" if ok_mail else "실패", "OK" if ok_fb else "실패"))
 
     def on_toggle_run(self):
         if self.collector and self.collector.running:

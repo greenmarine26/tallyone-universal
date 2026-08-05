@@ -1,25 +1,34 @@
-# 메일파일럿 Uni 0.1 — 범용 IMAP 수집기 코어(선박·항차 자동 판독 → 폴더 적재 → 파이어베이스 등록)
+# 메일파일럿 Uni 0.2 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 자동 판독 → 폴더 적재 → 파이어베이스 등록)
 # ⚠ 보안: config.json 에 메일 비밀번호가 평문으로 저장된다. 개인 PC 전용이며 공용 PC에서 쓰지 않는다.
 #   (MVP 한계 — 다음 판에서 암호화 예정. config.json 은 절대 커밋하지 않는다.)
 """메일파일럿 Uni — 사전(선박 목록) 없이 메일에서 선박·항차를 스스로 읽어내는 범용 수집기.
 
 흐름:
-  1) IMAP 접속(프리셋: 네이버/한메일/지메일/직접입력)
-  2) 최근 N일 메일 검색 → 제목·발신자·첨부 추출
+  1) 메일 서버 접속 — 프리셋(후이즈/회사메일 · 네이버 · 한메일 · 지메일 · 직접입력)
+     · 후이즈/회사메일: POP3(pop.whoisworks.com:995, SSL) — 아이디·비밀번호만으로 붙는다(앱 비밀번호 불필요)
+     · 네이버 / 한메일 / 지메일: IMAP
+  2) 최근 N일 메일을 고른다
+     · IMAP: SINCE 검색
+     · POP3: UIDL 목록 중 캐시(pop_uidl_cache.json)에 없는 것만 내려받는다.
+             서버의 메일은 절대 지우지 않는다(DELE 금지 — 원본 보존).
   3) 제목 → 첨부파일명 순으로 항차 토큰(예: 2630W, V.535E, R083W)을 찾고
      그 앞의 영문 대문자 낱말에서 선박명을 뽑아 4자 선박코드를 만든다
   4) {mailbox_root}/{선박코드}/{항차}/{첨부파일명} 으로 적재
      판독 실패 메일은 {mailbox_root}/_미분류/{날짜}_{제목요약}/ 로 — 절대 버리지 않는다
   5) 파이어베이스(익명 인증 REST)에 vessels/{코드}, collector_heartbeat, collect_log 기록
+
+IMAP 과 POP3 는 '메일을 가져오는 방법'만 다르다. 판독·적재·등록은 완전히 같은 함수를 쓴다.
 """
 
 import base64
 import email
 import email.header
 import email.utils
+import hashlib
 import imaplib
 import json
 import os
+import poplib
 import re
 import ssl
 import threading
@@ -29,49 +38,77 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-VERSION = "MailPilot Uni 0.1"
+VERSION = "MailPilot Uni 0.2"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 CACHE_PATH = os.path.join(HERE, "vessels_cache.json")
+UIDL_CACHE_PATH = os.path.join(HERE, "pop_uidl_cache.json")
 LOG_DIR = os.path.join(HERE, "logs")
 
 HTTP_TIMEOUT = 15          # 초 — 모든 네트워크 요청 공통(조용한 실패 금지)
 IMAP_TIMEOUT = 30          # 초
+POP3_TIMEOUT = 30          # 초
 UNCLASSIFIED_DIR = "_미분류"
 MAX_VESSEL_WORDS = 2       # 선박명으로 인정하는 낱말 수 상한(설계 확정치)
 COLLECT_LOG_KEEP = 50      # collect_log 롤링 보존 건수
 
-# 메일사 프리셋 — (IMAP 서버, 포트, 안내문)
-IMAP_PRESETS = {
+# 메일사 프리셋 — 프로토콜/서버/포트/SSL/안내문. gui.py 와 공용(중복 정의 금지).
+PRESETS = {
+    "whois": {
+        "label": "후이즈/회사메일",
+        "protocol": "pop3",
+        "host": "pop.whoisworks.com",
+        "port": 995,
+        "ssl": True,
+        "help": "웹메일 환경설정에서 POP3/SMTP 사용함 확인. 아이디는 메일주소 전체,\n"
+                "비밀번호는 웹메일 로그인 비밀번호.\n"
+                "(예: 아이디 office@greenmarine.co.kr — 2단계 인증·앱 비밀번호가 필요 없습니다.\n"
+                " 서버에 있는 메일은 지우지 않고 복사만 해 옵니다.)",
+    },
     "naver": {
         "label": "네이버 메일",
+        "protocol": "imap",
         "host": "imap.naver.com",
         "port": 993,
+        "ssl": True,
         "help": "네이버 메일 → 환경설정 → POP3/IMAP 설정 → 'IMAP/SMTP 사용'을 '사용함'으로.\n"
                 "2단계 인증을 쓰면 로그인 비밀번호 대신 '애플리케이션 비밀번호'를 넣는다.",
     },
     "daum": {
         "label": "한메일(다음)",
+        "protocol": "imap",
         "host": "imap.daum.net",
         "port": 993,
+        "ssl": True,
         "help": "다음 메일 → 환경설정 → IMAP/POP3 → 'IMAP 사용'을 켠다.\n"
                 "카카오 2단계 인증 사용 시 앱 비밀번호가 필요하다.",
     },
     "gmail": {
         "label": "지메일",
+        "protocol": "imap",
         "host": "imap.gmail.com",
         "port": 993,
+        "ssl": True,
         "help": "지메일은 '앱 비밀번호'가 반드시 필요하다(구글 계정 → 보안 → 2단계 인증 → 앱 비밀번호).\n"
                 "일반 로그인 비밀번호로는 IMAP 접속이 막힌다.",
     },
     "custom": {
         "label": "직접 입력",
+        "protocol": "imap",
         "host": "",
         "port": 993,
-        "help": "회사 메일 등 직접 입력. 메일 관리자에게 IMAP 서버 주소와 포트(보통 993/SSL)를 받는다.",
+        "ssl": True,
+        "help": "회사 메일 등 직접 입력. 메일 관리자에게 방식(IMAP/POP3)과 서버 주소·포트를 받는다.\n"
+                "보통 IMAP 993 / POP3 995 이며 둘 다 SSL 을 쓴다.",
     },
 }
+
+# 화면에 보여 줄 순서 — 후이즈/회사메일이 기본(가장 손이 덜 간다)
+PRESET_ORDER = ("whois", "naver", "daum", "gmail", "custom")
+
+# 0.1 호환 별칭(예전 이름으로 부르는 코드가 있어도 깨지지 않게)
+IMAP_PRESETS = PRESETS
 
 # 첨부로 받아들이는 확장자(대소문자 무관)
 ATTACH_EXTS = (".edi", ".asc", ".txt", ".xls", ".xlsx", ".pdf")
@@ -142,9 +179,14 @@ def log(msg, log_dir=None):
 # ──────────────────────────── 설정/캐시 입출력 ────────────────────────────
 
 DEFAULT_CONFIG = {
-    "provider": "naver",
-    "imap_host": "imap.naver.com",
-    "imap_port": 993,
+    "provider": "whois",
+    "protocol": "pop3",
+    "host": "pop.whoisworks.com",
+    "port": 995,
+    "ssl": True,
+    # 0.1 호환 거울값 — 예전 설정 파일과 섞여도 같은 값을 가리킨다
+    "imap_host": "pop.whoisworks.com",
+    "imap_port": 995,
     "email": "",
     "password": "",
     "mailbox_root": "",
@@ -152,6 +194,58 @@ DEFAULT_CONFIG = {
     "poll_minutes": 10,
     "firebase": {},
 }
+
+
+# ── 설정 읽기 도우미 — 0.1(imap_host/imap_port)과 0.2(host/port/protocol/ssl)를 모두 받는다 ──
+
+def cfg_provider(cfg):
+    key = (cfg or {}).get("provider") or ""
+    return key if key in PRESETS else "custom"
+
+
+def cfg_protocol(cfg):
+    """'imap' 또는 'pop3'. 설정에 없으면 프리셋 값, 그것도 없으면 imap."""
+    cfg = cfg or {}
+    proto = (cfg.get("protocol") or "").strip().lower()
+    if proto not in ("imap", "pop3"):
+        proto = PRESETS.get(cfg.get("provider") or "", {}).get("protocol", "imap")
+    return proto
+
+
+def cfg_host(cfg):
+    cfg = cfg or {}
+    host = (cfg.get("host") or cfg.get("imap_host") or "").strip()
+    if not host:
+        host = PRESETS.get(cfg.get("provider") or "", {}).get("host", "")
+    return host
+
+
+def cfg_port(cfg):
+    cfg = cfg or {}
+    for key in ("port", "imap_port"):
+        raw = cfg.get(key)
+        if raw:
+            try:
+                return int(str(raw).strip())
+            except (TypeError, ValueError):
+                pass
+    preset = PRESETS.get(cfg.get("provider") or "", {})
+    if preset.get("port"):
+        return int(preset["port"])
+    return 995 if cfg_protocol(cfg) == "pop3" else 993
+
+
+def cfg_ssl(cfg):
+    cfg = cfg or {}
+    if "ssl" in cfg:
+        return bool(cfg.get("ssl"))
+    preset = PRESETS.get(cfg.get("provider") or "", {})
+    return bool(preset.get("ssl", True))
+
+
+def account_key(cfg):
+    """UIDL 캐시를 계정별로 나누는 열쇠(서버|아이디). 계정을 바꾸면 캐시가 섞이지 않는다."""
+    return "%s|%s" % (cfg_host(cfg).lower(), ((cfg or {}).get("email") or "").lower())
 
 
 def load_config(path=None):
@@ -203,6 +297,33 @@ def save_cache(cache, path=None):
             json.dump(cache, fh, ensure_ascii=False, indent=2)
     except OSError as exc:
         log("선박 캐시 저장 실패: %s" % exc)
+
+
+def load_uidl_cache(path=None):
+    """POP3 로 이미 받아 본 메일의 UIDL 목록(계정별). 없으면 빈 캐시."""
+    path = path or UIDL_CACHE_PATH
+    if not os.path.exists(path):
+        return {"accounts": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log("POP3 수신 이력을 읽지 못해 새로 만듭니다: %s" % exc)
+        return {"accounts": {}}
+    if not isinstance(data, dict):
+        return {"accounts": {}}
+    data.setdefault("accounts", {})
+    return data
+
+
+def save_uidl_cache(cache, path=None):
+    path = path or UIDL_CACHE_PATH
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        log("POP3 수신 이력 저장 실패: %s" % exc)
 
 
 def parse_firebase_config(text):
@@ -612,9 +733,9 @@ def _now_iso():
 
 def imap_connect(cfg, imap_factory=None):
     """IMAP 접속 + 로그인. 실패는 예외를 그대로 올린다(조용한 실패 금지)."""
-    factory = imap_factory or imaplib.IMAP4_SSL
-    host = cfg.get("imap_host") or IMAP_PRESETS.get(cfg.get("provider", ""), {}).get("host", "")
-    port = int(cfg.get("imap_port") or 993)
+    factory = imap_factory or (imaplib.IMAP4_SSL if cfg_ssl(cfg) else imaplib.IMAP4)
+    host = cfg_host(cfg)
+    port = cfg_port(cfg)
     if not host:
         raise ValueError("IMAP 서버 주소가 비어 있습니다.")
     try:
@@ -650,16 +771,137 @@ def fetch_message(conn, num):
     return None
 
 
+# ──────────────────────────── POP3 (후이즈/회사메일 — 아이디·비밀번호만) ────────────────────────────
+#
+# 설계 원칙
+#   · 서버의 메일은 절대 지우지 않는다 — DELE 를 호출하는 코드는 이 파일 어디에도 없다.
+#   · 받아 본 메일은 UIDL(서버가 주는 고유 번호)로 기억해 두 번 내려받지 않는다.
+#   · UIDL 을 지원하지 않는 서버는 TOP 으로 헤더만 받아 Message-ID 해시로 대신한다.
+#   · 내려받은 원문은 IMAP 과 똑같은 _handle_message() 로 들어간다(판독·적재 코드는 하나뿐).
+
+def pop3_connect(cfg, pop_factory=None):
+    """POP3 접속 + 로그인. 실패는 예외를 그대로 올린다(조용한 실패 금지)."""
+    use_ssl = cfg_ssl(cfg)
+    factory = pop_factory or (poplib.POP3_SSL if use_ssl else poplib.POP3)
+    host = cfg_host(cfg)
+    port = cfg_port(cfg)
+    if not host:
+        raise ValueError("POP3 서버 주소가 비어 있습니다.")
+    kwargs = {"timeout": POP3_TIMEOUT}
+    if use_ssl and pop_factory is None:
+        kwargs["context"] = ssl.create_default_context()
+    try:
+        conn = factory(host, port, **kwargs)
+    except TypeError:                                # 목/구버전 호환
+        conn = factory(host, port)
+    conn.user(cfg.get("email", ""))
+    conn.pass_(cfg.get("password", ""))
+    return conn
+
+
+def _pop3_join(lines):
+    out = []
+    for line in lines or []:
+        out.append(bytes(line) if isinstance(line, (bytes, bytearray)) else str(line).encode("utf-8", "replace"))
+    return b"\r\n".join(out)
+
+
+def pop3_top(conn, num, lines=0):
+    """헤더만 받아 온다(TOP). 서버가 TOP 을 막아 두면 None."""
+    try:
+        res = conn.top(num, lines)
+    except Exception:
+        return None
+    try:
+        return _pop3_join(res[1])
+    except (IndexError, TypeError):
+        return None
+
+
+def pop3_retr(conn, num):
+    """메일 원문 전체(RETR). 서버에서 지우지 않는다."""
+    res = conn.retr(num)
+    return _pop3_join(res[1])
+
+
+def _fallback_uid(header_bytes, num):
+    """UIDL 미지원 서버용 대체 열쇠 — Message-ID 해시, 없으면 제목·날짜·발신자 해시."""
+    msg = None
+    mid = ""
+    if header_bytes:
+        try:
+            msg = email.message_from_bytes(header_bytes)
+            mid = (msg.get("Message-ID") or "").strip()
+        except Exception:
+            msg, mid = None, ""
+    if mid:
+        return "m:" + hashlib.md5(mid.encode("utf-8", "replace")).hexdigest()
+    if msg is not None:
+        base = "|".join((msg.get(h) or "") for h in ("Subject", "Date", "From"))
+        if base.strip("|"):
+            return "h:" + hashlib.md5(base.encode("utf-8", "replace")).hexdigest()
+    return "n:%d" % num                              # 최후 수단(서버 정렬이 바뀌면 다시 받을 수 있다)
+
+
+def pop3_uid_list(conn):
+    """[(메시지번호, 고유열쇠)] 목록과 UIDL 지원 여부를 돌려준다."""
+    try:
+        res = conn.uidl()
+        entries = []
+        for line in res[1] or []:
+            text = line.decode("ascii", "replace") if isinstance(line, (bytes, bytearray)) else str(line)
+            parts = text.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                entries.append((int(parts[0]), parts[1].strip()))
+        if entries:
+            return entries, True
+    except Exception:
+        pass                                          # 아래 폴백으로 — 조용히 끝내지 않는다
+    count = int(conn.stat()[0])
+    entries = []
+    for num in range(1, count + 1):
+        entries.append((num, _fallback_uid(pop3_top(conn, num), num)))
+    return entries, False
+
+
+def _local_now():
+    return datetime.now(timezone.utc).astimezone()
+
+
+def collect_cutoff(days):
+    """collect_days 경계 시각(이보다 오래된 메일은 내려받지 않는다)."""
+    return _local_now() - timedelta(days=max(1, int(days or 7)))
+
+
+def header_date(header_bytes):
+    """헤더 바이트에서 Date 를 읽는다. 못 읽으면 None(그때는 날짜로 거르지 않는다)."""
+    if not header_bytes:
+        return None
+    try:
+        msg = email.message_from_bytes(header_bytes)
+        when = email.utils.parsedate_to_datetime(msg.get("Date"))
+    except Exception:
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=_local_now().tzinfo)
+    return when
+
+
 class Collector:
     """수집 루프 — run_cycle() 한 사이클, start()/stop() 로 주기 실행."""
 
     def __init__(self, cfg, imap_factory=None, firebase=None,
-                 cache_path=None, log_dir=None):
+                 cache_path=None, log_dir=None, pop_factory=None, uidl_cache_path=None):
         self.cfg = cfg or {}
         self.imap_factory = imap_factory
+        self.pop_factory = pop_factory
         self.cache_path = cache_path or CACHE_PATH
+        self.uidl_cache_path = uidl_cache_path or UIDL_CACHE_PATH
         self.log_dir = log_dir or LOG_DIR
         self.cache = load_cache(self.cache_path)
+        self.uidl_cache = load_uidl_cache(self.uidl_cache_path)
         self.firebase = firebase if firebase is not None else FirebaseREST(self.cfg.get("firebase"))
         self._stop = threading.Event()
         self._thread = None
@@ -674,15 +916,34 @@ class Collector:
         os.makedirs(root, exist_ok=True)
 
         summary = {"at": _now_iso(), "mails": 0, "files": 0, "skipped": 0,
-                   "unclassified": 0, "vessels": [], "errors": 0}
+                   "unclassified": 0, "old_skipped": 0, "vessels": [], "errors": 0}
+
+        protocol = cfg_protocol(self.cfg)
+        if protocol == "pop3":
+            connected = self._cycle_pop3(root, summary)
+        else:
+            connected = self._cycle_imap(root, summary)
+        if not connected:                            # 접속 자체가 안 됐으면 등록 단계로 넘어가지 않는다
+            self.last_summary = summary
+            return summary
+
+        save_cache(self.cache, self.cache_path)
+        log("사이클 완료 — 메일 %d · 저장 %d · 스킵 %d · 미분류 %d · 오류 %d"
+            % (summary["mails"], summary["files"], summary["skipped"],
+               summary["unclassified"], summary["errors"]), self.log_dir)
+        self._report(summary)
+        self.last_summary = summary
+        return summary
+
+    # ── IMAP 경로 ──
+    def _cycle_imap(self, root, summary):
         conn = None
         try:
             conn = imap_connect(self.cfg, self.imap_factory)
         except Exception as exc:
             log("IMAP 접속 실패: %s" % exc, self.log_dir)
             summary["errors"] += 1
-            self.last_summary = summary
-            return summary
+            return False
 
         try:
             nums = imap_search_recent(conn, self.cfg.get("collect_days", 7))
@@ -712,14 +973,68 @@ class Collector:
                     getattr(conn, closer)()
                 except Exception:
                     pass
+        return True
 
-        save_cache(self.cache, self.cache_path)
-        log("사이클 완료 — 메일 %d · 저장 %d · 스킵 %d · 미분류 %d · 오류 %d"
-            % (summary["mails"], summary["files"], summary["skipped"],
-               summary["unclassified"], summary["errors"]), self.log_dir)
-        self._report(summary)
-        self.last_summary = summary
-        return summary
+    # ── POP3 경로(서버 메일은 지우지 않는다) ──
+    def _cycle_pop3(self, root, summary):
+        conn = None
+        try:
+            conn = pop3_connect(self.cfg, self.pop_factory)
+        except Exception as exc:
+            log("POP3 접속 실패: %s" % exc, self.log_dir)
+            summary["errors"] += 1
+            return False
+
+        seen = self.uidl_cache.setdefault("accounts", {}).setdefault(account_key(self.cfg), {})
+        days = self.cfg.get("collect_days", 7)
+        cutoff = collect_cutoff(days)
+        try:
+            entries, uidl_ok = pop3_uid_list(conn)
+            if not uidl_ok:
+                log("서버가 UIDL 을 지원하지 않아 헤더(Message-ID) 해시로 중복을 가립니다.", self.log_dir)
+            fresh = [e for e in entries if e[1] not in seen]
+            log("서버 메일 %d통 중 새 메일 %d통을 확인합니다(최근 %s일 · 서버 원본은 지우지 않습니다)."
+                % (len(entries), len(fresh), days), self.log_dir)
+
+            for num, uid in fresh:
+                if self._stop.is_set():
+                    log("중지 요청 — 이번 사이클을 여기서 끊습니다.", self.log_dir)
+                    break
+                when = header_date(pop3_top(conn, num))
+                if when is not None and when < cutoff:
+                    seen[uid] = _now_iso()           # 캐시에 남겨 다음 사이클에 또 받지 않는다
+                    summary["old_skipped"] += 1
+                    continue
+                try:
+                    raw = pop3_retr(conn, num)
+                except Exception as exc:
+                    log("메일 %s 가져오기 실패: %s" % (num, exc), self.log_dir)
+                    summary["errors"] += 1
+                    continue
+                if not raw:
+                    continue
+                summary["mails"] += 1
+                try:
+                    self._handle_message(raw, root, summary)
+                except Exception as exc:
+                    log("메일 %s 처리 실패: %s" % (num, exc), self.log_dir)
+                    summary["errors"] += 1
+                    continue                         # 처리 못 한 메일은 기억하지 않는다(다음에 다시 시도)
+                seen[uid] = _now_iso()
+
+            alive = set(uid for _num, uid in entries)
+            for uid in [u for u in seen if u not in alive]:
+                del seen[uid]                        # 서버에서 사라진 메일은 캐시에서도 정리(무한 증가 방지)
+            if summary["old_skipped"]:
+                log("최근 %s일보다 오래된 메일 %d통은 내려받지 않았습니다."
+                    % (days, summary["old_skipped"]), self.log_dir)
+        finally:
+            try:
+                conn.quit()                          # QUIT 만 — DELE 는 어디서도 부르지 않는다
+            except Exception:
+                pass
+        save_uidl_cache(self.uidl_cache, self.uidl_cache_path)
+        return True
 
     def _handle_message(self, raw, root, summary):
         subject, sender, when, attachments = parse_message(raw)
@@ -827,6 +1142,42 @@ def test_imap(cfg, imap_factory=None, sample=3):
                 getattr(conn, closer)()
             except Exception:
                 pass
+
+
+def test_pop3(cfg, pop_factory=None, sample=3):
+    """POP3 로그인 → STAT(메일 수·용량) → 최근 몇 건 제목(TOP). (성공여부, 메시지) 반환."""
+    conn = None
+    try:
+        conn = pop3_connect(cfg, pop_factory)
+        stat = conn.stat()
+        count, octets = int(stat[0]), int(stat[1])
+        titles = []
+        for num in range(count, max(0, count - sample), -1):
+            head = pop3_top(conn, num)
+            if not head:
+                continue
+            try:
+                titles.append(decode_header_text(email.message_from_bytes(head).get("Subject")))
+            except Exception:
+                continue
+        lines = ["POP3 로그인 성공 — 서버에 메일 %d통(%.1f MB)" % (count, octets / 1048576.0)]
+        lines += ["  · " + t for t in titles] or ["  (표시할 최근 메일 없음)"]
+        lines.append("  ※ 서버의 메일은 지우지 않습니다 — 복사만 해 옵니다.")
+        return True, "\n".join(lines)
+    except Exception as exc:
+        return False, "POP3 접속 실패: %s" % exc
+    finally:
+        try:
+            conn.quit()
+        except Exception:
+            pass
+
+
+def test_mail(cfg, imap_factory=None, pop_factory=None, sample=3):
+    """설정의 protocol 에 맞는 연결 테스트를 고른다(설정 창의 [연결 테스트] 진입점)."""
+    if cfg_protocol(cfg) == "pop3":
+        return test_pop3(cfg, pop_factory, sample)
+    return test_imap(cfg, imap_factory, sample)
 
 
 def test_firebase(fb_config, firebase=None):
