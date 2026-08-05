@@ -23,10 +23,11 @@ import os
 import re
 import time
 
+import berth_schedule as bsch                       # 0.6 — 터미널 선석배정(항차의 진실)
 import edi_parser as ep
 
 STATE_V = 1                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
-PARSER_TAG = "MailPilot Uni 0.5-01 (edi_parser)"
+PARSER_TAG = "MailPilot Uni 0.6 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
 # 홈포트(모항) 판정 — 검수앱 src/utils.js 의 PYEONGTAEK_CODES / PYEONGTAEK_SUFFIX 와 같은 기준.
@@ -556,8 +557,13 @@ def resolve_key(firebase, code, key_voy, other_voys=(), index=None):
     return "%s_%s" % (code, order[0] if order else key_voy), (order[0] if order else key_voy)
 
 
-def register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log):
-    """info — 없으면 만들고, 있으면 **빈 voy_d/voy_l 만** 채운다. 다른 필드는 절대 손대지 않는다."""
+def register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, plan_row=None):
+    """info — 없으면 만들고, 있으면 **빈 voy_d/voy_l 만** 채운다. 다른 필드는 절대 손대지 않는다.
+
+    0.6 — 배정표(plan_row)가 있으면 일정 칸을 함께 채운다. planDate·terminalStatus·berth·pier 는
+    '지금의 진실'이라 기존 값이 있어도 갱신하고, 나머지(vslFull 등)는 빈칸일 때만 채운다.
+    """
+    fresh, refresh = plan_info_fields(plan_row, log)
     current = firebase.get("voyages/%s/info" % key)
     if not isinstance(current, dict) or not current:
         info = {
@@ -573,16 +579,25 @@ def register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log):
             info["voy_d"] = voy_d
         if voy_l:
             info["voy_l"] = voy_l
+        info.update(fresh)
+        info.update(refresh)
         if firebase.put("voyages/%s/info" % key, strip_nulls(info)) is None:
             log("    ✗ 항차 등록 실패: %s — 다음 사이클에 다시 시도합니다." % key)
             return False
-        log("    + 항차 등록: %s (%s)" % (key, info["mode"]))
+        log("    + 항차 등록: %s (%s%s)"
+            % (key, info["mode"], " · 배정표" if (fresh or refresh) else ""))
         return True
     patch = {}
     if voy_d and not current.get("voy_d"):
         patch["voy_d"] = voy_d
     if voy_l and not current.get("voy_l"):
         patch["voy_l"] = voy_l
+    for field, value in fresh.items():                  # 기존 값 존중 — 빈칸만 채운다
+        if not current.get(field):
+            patch[field] = value
+    for field, value in refresh.items():                # 배정표가 최신 진실인 칸만 갱신한다
+        if current.get(field) != value:
+            patch[field] = value
     if patch:
         if firebase.patch("voyages/%s/info" % key, strip_nulls(patch)) is None:
             log("    ✗ 항차 보강 실패: %s — 다음 사이클에 다시 시도합니다." % key)
@@ -679,7 +694,8 @@ def voyage_folders(root, cache, master, log):
     return out
 
 
-def handle_group(firebase, code, key_voy, members, voy_d, voy_l, aliases, log, index=None):
+def handle_group(firebase, code, key_voy, members, voy_d, voy_l, aliases, log, index=None,
+                 plan_row=None):
     """한 항차(폴더 한 묶음) — 항차 등록 + 방향별 대표 EDI 업로드. (키, 올린 대수 합)."""
     other = [v for v, _p, _n in members] + [v for v in (voy_d, voy_l) if v]
     key, key_voy = resolve_key(firebase, code, key_voy, other, index)
@@ -687,7 +703,7 @@ def handle_group(firebase, code, key_voy, members, voy_d, voy_l, aliases, log, i
         index.setdefault(str(code).upper(), {}).setdefault(str(key_voy).upper(), key)
     log("  ▸ %s %s → %s (양하 %s · 선적 %s)"
         % (code, "+".join(v for v, _p, _n in members), key, voy_d or "-", voy_l or "-"))
-    ok = register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log)
+    ok = register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, plan_row)
 
     cands = []
     for voy, path, names in members:
@@ -775,13 +791,18 @@ def merge_voy_dirs(vessel_dir, log):
     return out
 
 
+def voyage_traces(firebase, key):
+    """(자식 이름들, 검수 흔적 이름들, info). info·discharge·loading 밖의 자식이 검수 흔적이다."""
+    children = firebase.get("voyages/%s" % key, params={"shallow": "true"})
+    children = children if isinstance(children, dict) else {}
+    info = firebase.get("voyages/%s/info" % key)
+    info = info if isinstance(info, dict) else {}
+    return children, sorted(c for c in children if c not in VOYAGE_SAFE_CHILDREN), info
+
+
 def merge_voyage_node(firebase, dup, key, log):
     """비정본 항차 키를 정본 키로 합친다. 돌려주는 값: 'deleted' | 'held' | 'failed'."""
-    children = firebase.get("voyages/%s" % dup, params={"shallow": "true"})
-    children = children if isinstance(children, dict) else {}
-    info = firebase.get("voyages/%s/info" % dup)
-    info = info if isinstance(info, dict) else {}
-    traces = sorted(c for c in children if c not in VOYAGE_SAFE_CHILDREN)
+    children, traces, info = voyage_traces(firebase, dup)
     if traces:
         log("  ⚠ 중복 항차 %s 에 검수 흔적(%s)이 있어 지우지 않습니다 — 사람이 판단하세요(정본 %s)."
             % (dup, ", ".join(traces), key))
@@ -907,10 +928,316 @@ def migrate_voyage_spelling(root, cache, master, firebase, log, state_path=None)
     return result
 
 
-def run(root, cache, master, firebase, cfg, log, state_path=None):
-    """사이클마다 한 번 — 메일박스를 훑어 변한 폴더만 앱(파이어베이스)에 채운다."""
+# ──────────────────────────── ㉳ 0.6 선석배정 게이트 ────────────────────────────
+#
+# 배정표(터미널 선석배정)가 **항차의 진실**이다. 메일만 보고 만들던 항차 카드가
+#   ① 지난 항차가 그대로 남고 ② 짝(E/W)이 두 장으로 갈라지고 ③ 작업일시가 비는
+# 세 가지 탈을 냈다(검수사 신고 2026-08-06 · 37키). 배정표로 거르고 채운다.
+#
+# 지키는 선: 배정표를 **못 받은 사이클엔 아무것도 하지 않는다**(게이트도 정리도 생략).
+#           배정표에 없는 선박은 종전대로 받는다(fail-open — 자료를 잃지 않는다).
+#           검수 흔적이 있는 키는 어떤 경우에도 지우지 않는다. 폴더·파일은 무접촉.
+
+# 기항 마감 신호 — 제목·첨부명의 'DEP.TALLY' / 'DEP TALLY' / 'DEP-TALLY'.
+_DEP_TALLY = re.compile(r"(?<![A-Z])DEP[\s._\-]*TALLY(?![A-Z])")
+
+
+class BerthPlan:
+    """이번 사이클의 선석배정표. 항차 대조는 0.5-01 voy_ident(정수 비교)를 그대로 쓴다."""
+
+    def __init__(self, rows):
+        self.rows = list(rows or [])
+        self._by_code = {}
+        for row in self.rows:
+            self._by_code.setdefault(str(row.get("vessel_code") or "").upper(), []).append(row)
+
+    def __len__(self):
+        return len(self.rows)
+
+    def rows_for(self, code):
+        return self._by_code.get(str(code or "").upper()) or []
+
+    def find(self, code, voys):
+        """이 선박의 이 항차(표기 여럿 중 하나라도)가 실린 배정표 줄. 없으면 None."""
+        idents = set()
+        plain = set()
+        for voy in voys:
+            text = str(voy or "").strip().upper()
+            if not text:
+                continue
+            plain.add(text)
+            ident = voy_ident(text)
+            if ident:
+                idents.add(ident)
+        for row in self.rows_for(code):
+            for field in ("voy_d", "voy_l"):
+                cand = str(row.get(field) or "").upper()
+                if not cand:
+                    continue
+                ident = voy_ident(cand)
+                if cand in plain or (ident and ident in idents):
+                    return row
+        return None
+
+
+# ── 기항 마감(DEP.TALLY) 캐시 — vessels_cache.json 안 "closed": {선박코드: {항차: 시각}} ──
+
+def closed_table(cache, code):
+    return ((cache or {}).get("closed") or {}).get(str(code or "").upper()) or {}
+
+
+def is_closed(cache, code, voys):
+    """이 항차가 마감(DEP.TALLY)으로 기록돼 있는가. 표기가 달라도 같은 항차면 잡는다."""
+    table = closed_table(cache, code)
+    if not table:
+        return ""
+    for voy in voys:
+        text = str(voy or "").strip().upper()
+        if not text:
+            continue
+        if text in table:
+            return text
+        ident = voy_ident(text)
+        if ident is None:
+            continue
+        for name in sorted(table):
+            if voy_ident(name) == ident:
+                return name
+    return ""
+
+
+def mark_closed(text, code, voy, cache, log=None):
+    """제목·첨부명에서 기항 마감(DEP.TALLY)을 읽어 캐시에 남긴다. 새로 안 항차만 돌려준다.
+
+    폴더 적재·기존 키 채우기는 계속한다 — 막는 것은 **새 항차 카드 만들기**뿐이다.
+    """
+    if not code or cache is None:
+        return []
+    up = " ".join(str(text or "").upper().split())
+    if not _DEP_TALLY.search(up):
+        return []
+    voys = [str(voy or "").upper().strip()]
+    for dis, load in find_pairs(up, voy):               # 같은 글에 짝이 적혀 있으면 둘 다 마감
+        voys += [dis, load]
+    partner = paired_partner(cache, code, voy)
+    if partner:
+        voys.append(str(partner).upper())
+    table = cache.setdefault("closed", {}).setdefault(str(code).upper(), {})
+    fresh = []
+    for name in voys:
+        if not name or not voy_direction(name):
+            continue
+        if is_closed(cache, code, [name]):
+            continue
+        table[name] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        fresh.append(name)
+    if fresh and log:
+        log("기항 마감(DEP.TALLY) 확인: %s %s" % (code, ", ".join(fresh)))
+    return fresh
+
+
+# ── 등록 게이트 ──
+
+def _key_known(index, code, voys):
+    """이 항차가 서버에 이미 카드로 있는가(표기가 달라도 같은 항차면 있다고 본다)."""
+    known = (index or {}).get(str(code or "").upper()) or {}
+    for voy in voys:
+        text = str(voy or "").strip().upper()
+        if not text:
+            continue
+        if text in known:
+            return True
+        ident = voy_ident(text)
+        if ident and any(voy_ident(name) == ident for name in known):
+            return True
+    return False
+
+
+def registration_gate(plan, cache, code, voys):
+    """새 항차 카드를 만들어도 되는가 → (된다, 사유). 이미 있는 키를 채우는 것은 막지 않는다."""
+    reason = is_closed(cache, code, voys)
+    if reason:
+        return False, "기항 마감(DEP.TALLY %s)" % reason
+    if plan is None:
+        return True, ""
+    row = plan.find(code, voys)
+    if row is None:
+        return True, ""                                 # 배정표에 없는 선박 — 종전대로(fail-open)
+    if row.get("excluded"):
+        return False, "비관할 항로 %s" % (row.get("route") or "?")
+    if row.get("departed"):
+        return False, "배정표 실적 출항(ATD %s)" % (row.get("atd") or row.get("etd") or "")
+    return True, ""
+
+
+def plan_info_fields(row, log=None):
+    """배정표 줄 → info 에 채울 (빈칸만 채울 것, 항상 갱신할 것). 못 읽은 값은 아예 안 보낸다."""
+    if not row:
+        return {}, {}
+    fresh, refresh = {}, {}
+    if row.get("vessel_name"):
+        fresh["vslFull"] = row["vessel_name"]
+    start = row.get("atb") or row.get("etb") or ""
+    end = row.get("atd") or row.get("etd") or ""
+    if start and end:
+        refresh["planDate"] = "%s ~ %s" % (start, end)
+        refresh["planSrc"] = "plan"
+    elif log and (start or end):
+        log("    · 배정표 %s — 접안·출항 한쪽 시각이 없어 planDate 를 비웁니다(%s ~ %s)"
+            % (row.get("master_vvd") or row.get("vessel_code"), start or "?", end or "?"))
+    # 검수앱 계약값(src/badgeRule.js)만 보낸다 — 모르는 낱말을 보내면 앱이 경고를 찍는다.
+    if row.get("status") in ("departed", "working", "planned"):
+        refresh["terminalStatus"] = row["status"]
+    if row.get("berth"):
+        refresh["berth"] = row["berth"]
+    if row.get("pier"):
+        refresh["pier"] = row["pier"]
+    return fresh, refresh
+
+
+def promote_pairs(plan, cache, log):
+    """배정표의 선사항차 짝을 짝 캐시에 정본으로 올린다 — 갈라진 카드를 한 장으로 되돌리는 근거."""
+    if plan is None or cache is None:
+        return 0
+    count = 0
+    for row in plan.rows:
+        if row.get("excluded"):
+            continue
+        code = str(row.get("vessel_code") or "").upper()
+        dis, load = row.get("voy_d") or "", row.get("voy_l") or ""
+        if not code or not dis or not load:
+            continue
+        table = cache.setdefault("pairs", {}).setdefault(code, {})
+        if same_voyage(_table_get(table, dis), load) and same_voyage(_table_get(table, load), dis):
+            continue
+        table[dis], table[load] = load, dis
+        count += 1
+        log("  ↔ 배정표 짝 확정: %s %s ↔ %s (%s)"
+            % (code, dis, load, row.get("master_vvd") or row.get("terminal")))
+    return count
+
+
+# ── 기존 키 정리 — 배정표를 받은 사이클에 한 번(멱등) ──
+
+def remove_voyage_key(firebase, key, why, log):
+    """자동 등록이고 검수 흔적이 없는 항차 키만 지운다. 'deleted' | 'held' | 'failed'."""
+    _children, traces, info = voyage_traces(firebase, key)
+    if traces:
+        log("  ⚠ %s 는 검수 흔적(%s)이 있어 지우지 않습니다 — %s" % (key, ", ".join(traces), why))
+        return "held"
+    if info and not info.get("autoRegistered"):
+        log("  ⚠ %s 는 사람이 만든 항차(만든이 %s)라 지우지 않습니다 — %s"
+            % (key, info.get("createdBy") or "?", why))
+        return "held"
+    firebase.delete("voyages/%s" % key)
+    if firebase.get("voyages/%s" % key, params={"shallow": "true"}):
+        log("  ✗ 항차 키가 남아 있습니다: voyages/%s" % key)
+        return "failed"
+    log("  − 지난 항차 카드 삭제: %s (%s · 폴더·파일은 그대로)" % (key, why))
+    return "deleted"
+
+
+def reconcile_with_plan(firebase, cache, plan, log):
+    """배정표로 서버 항차를 한 번 맞춘다 — ⓐ갈라진 짝 병합 ⓑ일정 보강 ⓒ지난 항차 카드 제거.
+
+    여러 번 돌려도 안전하다(멱등). 실패는 건마다 세고 사이클은 계속한다.
+    """
+    out = {"merged": [], "filled": [], "deleted": [], "held": [], "errors": 0}
+    index = voyage_index(firebase, log)
+    if not index:
+        log("선석배정 정리 — 서버 항차 키를 읽지 못해 건너뜁니다.")
+        return out
+
+    # ⓐ·ⓑ 배정표 한 줄 = 카드 한 장. 갈라진 키를 정본으로 합치고 일정을 채운다.
+    for row in plan.rows:
+        if row.get("excluded"):
+            continue                                    # 비관할 항로는 손대지 않는다
+        code = str(row.get("vessel_code") or "").upper()
+        known = index.get(code) or {}
+        if not known:
+            continue
+        dis, load = row.get("voy_d") or "", row.get("voy_l") or ""
+        hits = []
+        for want in (dis, load):
+            ident = voy_ident(want)
+            if not want:
+                continue
+            for voy in sorted(known):
+                if (voy == want.upper() or (ident and voy_ident(voy) == ident)) \
+                        and known[voy] not in [h[1] for h in hits]:
+                    hits.append((voy, known[voy]))
+        if not hits:
+            continue
+        canon_voy, canon = hits[0]
+        for voy, dup in hits[1:]:
+            state = merge_voyage_node(firebase, dup, canon, log)
+            if state == "deleted":
+                out["merged"].append((dup, canon))
+                known.pop(voy, None)
+            elif state == "held":
+                out["held"].append(dup)
+            else:
+                out["errors"] += 1
+        if register_voyage(firebase, canon, code, canon_voy, dis, load, log, row):
+            out["filled"].append(canon)
+        else:
+            out["errors"] += 1
+
+    # ⓒ 지난 항차 카드 제거 — 지울 것을 **먼저 전부 적고** 나서 지운다.
+    index = voyage_index(firebase, log)
+    plan_gone = []
+    for code in sorted(index):
+        for voy in sorted(index[code]):
+            key = index[code][voy]
+            row = plan.find(code, [voy])
+            if row is not None and row.get("excluded"):
+                continue                                # 비관할 항로 — 판단을 미룬다
+            if row is not None and row.get("departed"):
+                plan_gone.append((key, "배정표 실적 출항 %s"
+                                  % (row.get("atd") or row.get("etd") or "")))
+            elif row is None and is_closed(cache, code, [voy]):
+                plan_gone.append((key, "기항 마감(DEP.TALLY) · 배정표 창 밖"))
+    if not plan_gone:
+        log("선석배정 정리 — 치울 지난 항차가 없습니다.")
+        return out
+    log("선석배정 정리 — 지난 항차 카드 %d개를 확인했습니다: %s"
+        % (len(plan_gone), ", ".join(k for k, _w in plan_gone)))
+    for key, why in plan_gone:
+        state = remove_voyage_key(firebase, key, why, log)
+        if state == "deleted":
+            out["deleted"].append(key)
+        elif state == "held":
+            out["held"].append(key)
+        else:
+            out["errors"] += 1
+    return out
+
+
+def fetch_plan(cfg, log, opener=None, now_ms=None):
+    """사이클당 터미널별 1회 — 선석배정표. 못 받으면 (None, 사유)를 그대로 올린다.
+
+    설정에 berth_plan 이 **참일 때만** 조회한다(DEFAULT_CONFIG 기본값 True). 설정을 안 거친
+    호출(시험·옛 설정)이 뜻하지 않게 바깥 사이트를 부르는 일을 막는 잠금이다.
+    """
+    if not (cfg or {}).get("berth_plan"):
+        return None, "설정에서 선석배정 조회를 껐습니다(berth_plan)"
+    rows, why = bsch.fetch_all(cfg, log, opener=opener, now_ms=now_ms)
+    if rows is None:
+        return None, why
+    return BerthPlan(rows), None
+
+
+def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=False,
+        opener=None, now_ms=None):
+    """사이클마다 한 번 — 메일박스를 훑어 변한 폴더만 앱(파이어베이스)에 채운다.
+
+    0.6 — 먼저 선석배정표를 한 번 읽는다. 받았으면 짝을 확정하고(필요하면 한 번 정리하고)
+    배정표에 없거나 이미 나간 항차의 **새 카드 만들기**를 막는다. 못 받았으면 그 단계를
+    통째로 건너뛰고 0.5-01 과 똑같이 돈다(자료를 잃지 않는 쪽).
+    """
     result = {"folders": 0, "voyages": 0, "changed": 0, "skipped": 0, "uploads": 0,
-              "errors": 0, "registered": [], "pairs": 0}
+              "errors": 0, "registered": [], "pairs": 0, "blocked": [], "plan": 0,
+              "planReconciled": False}
     if firebase is None or not getattr(firebase, "enabled", False):
         log("파이어베이스 미설정 — 앱 채우기(항차·EDI 등록)를 건너뜁니다.")
         return result
@@ -928,6 +1255,26 @@ def run(root, cache, master, firebase, cfg, log, state_path=None):
     folders = voyage_folders(root, cache, master, log)
     result["folders"] = len(folders)
 
+    # 0차 — 선석배정표(항차의 진실). 못 받으면 게이트·정리를 통째로 건너뛴다(조용한 실패 금지).
+    plan, why = fetch_plan(cfg, log, opener, now_ms)
+    if plan is None:
+        log("선석배정표를 받지 못해 이번 사이클은 게이트·정리를 건너뜁니다 — %s" % why)
+    else:
+        result["plan"] = len(plan)
+        log("선석배정표 %d줄 수신(PNCT %d · PCTC %d) — 비관할 %d줄"
+            % (len(plan),
+               sum(1 for r in plan.rows if r.get("terminal") == "PNCT"),
+               sum(1 for r in plan.rows if r.get("terminal") == "PCTC"),
+               sum(1 for r in plan.rows if r.get("excluded"))))
+        result["pairs"] += promote_pairs(plan, cache, log)
+        if reconcile:
+            try:
+                result["reconcile"] = reconcile_with_plan(firebase, cache, plan, log)
+                result["planReconciled"] = True
+            except Exception as exc:                    # 정리가 죽어도 수집·업로드는 계속한다
+                log("선석배정 정리 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc))
+                result["errors"] += 1
+
     # 1차 — 짝 증거부터 모은다(키를 정하기 전에 다 알고 있어야 한 키로 묶인다).
     for code, voy, _path, names in folders:
         result["pairs"] += len(collect_pairs(" ".join([voy] + names), code, cache, context_voy=voy))
@@ -944,10 +1291,19 @@ def run(root, cache, master, firebase, cfg, log, state_path=None):
         if (state["folders"].get(rel) or {}).get("fp") == fingerprint:
             result["skipped"] += 1
             continue
+        voys = [v for v, _p, _n in members] + [v for v in (key_voy, voy_d, voy_l) if v]
+        plan_row = plan.find(code, voys) if plan is not None else None
+        allowed, why = registration_gate(plan, cache, code, voys)
+        if not allowed and not _key_known(index, code, voys):
+            log("  ⤫ %s %s 새 항차 카드를 만들지 않습니다 — %s (폴더·파일은 그대로)"
+                % (code, "+".join(v for v, _p, _n in members), why))
+            result["blocked"].append("%s_%s" % (code, key_voy))
+            state["folders"][rel] = {"fp": fingerprint, "blocked": why, "at": _now_ms()}
+            continue
         result["changed"] += 1
         try:
             key, uploaded, sent = handle_group(firebase, code, key_voy, members,
-                                               voy_d, voy_l, aliases, log, index)
+                                               voy_d, voy_l, aliases, log, index, plan_row)
         except Exception as exc:                        # 항차 하나가 죽어도 사이클은 계속된다
             log("  앱 채우기 실패 %s (%s: %s)" % (rel, type(exc).__name__, exc))
             result["errors"] += 1
@@ -961,6 +1317,9 @@ def run(root, cache, master, firebase, cfg, log, state_path=None):
             result["registered"].append(key)
 
     save_state(state, state_path, log)
+    if result["blocked"]:
+        log("앱 채우기 — 배정표 게이트로 새 카드를 만들지 않은 항차 %d개: %s"
+            % (len(result["blocked"]), ", ".join(result["blocked"])))
     if result["changed"] or result["errors"]:
         log("앱 채우기 완료 — 폴더 %d · 항차 %d(새 자료 %d · 그대로 %d) · 올린 항차 %d · EDI %d대 · 오류 %d"
             % (result["folders"], result["voyages"], result["changed"], result["skipped"],

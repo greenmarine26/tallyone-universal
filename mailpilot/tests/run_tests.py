@@ -29,6 +29,9 @@
  23) 하트비트 — 앱 health.js 가 읽는 모양(at 은 ms 숫자, cycleMin)
  24) 0.5-01 항차 표기 정규화 — 0패딩 흔들림(0535E/535E) 병합·정본 선정·중복 키 정리·멱등
      (XTPG 실사례 그대로 · DJCT 0221E 무접촉 · R083W 접두 보호 · 검수 흔적 보류)
+ 25) 0.6 선석배정 게이트 — 두 터미널 실응답 픽스처 판독(짝·시각·상태·부두) · 요청 1회/터미널 ·
+     등록 게이트(출항·비관할·DEP.TALLY·fail-open) · 배정표 짝 승격 · 갈라진 카드 병합 ·
+     지난 항차 제거(검수 흔적 보류) · 배정표 못 받으면 무삭제 · 멱등
 """
 
 import datetime
@@ -2516,6 +2519,380 @@ def test_voyage_spelling():
           au.migrate_voyage_spelling(tempfile.gettempdir(), {}, [], FakeDB(), _quiet)["merged"] == [])
 
 
+# ────────────────────── 25) 0.6 선석배정 게이트 — 터미널이 항차의 진실 ──────────────────────
+#   실응답 픽스처(2026-08-06 조회, 공개 자료):
+#     tests/fixtures/berth_pnct_20260806.xml  — 넥사크로 Dataset ds_list 28줄
+#     tests/fixtures/berth_pctc_20260806.html — 선석배정 차트 서버렌더 HTML 21줄
+#   시각은 픽스처 조회 시점(2026-08-06 07:00)으로 못 박는다 — 오늘이 언제든 결과가 같아야 한다.
+
+FIX_DIR = os.path.join(HERE, "fixtures")
+BERTH_NOW = int(datetime.datetime(2026, 8, 6, 7, 0).timestamp() * 1000)
+
+
+def _fixture(name):
+    with open(os.path.join(FIX_DIR, name), "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+class _FakeRes:
+    def __init__(self, body):
+        self.body = body.encode("utf-8")
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeHTTP:
+    """터미널 대역 — 부른 URL·본문·헤더를 남겨 '사이클당 1회'를 눈으로 확인한다."""
+
+    def __init__(self, pnct=None, pctc=None, boom=()):
+        self.pnct, self.pctc, self.boom = pnct, pctc, set(boom)
+        self.calls = []
+
+    def __call__(self, req, timeout=None):
+        url = req.full_url
+        body = req.data.decode("utf-8") if req.data else ""
+        self.calls.append((url, body, dict(req.headers), timeout))
+        if "pnct" in url:
+            if "PNCT" in self.boom:
+                raise IOError("연결 거부(시험)")
+            return _FakeRes(self.pnct if self.pnct is not None else "")
+        if "PCTC" in self.boom:
+            raise IOError("연결 거부(시험)")
+        return _FakeRes(self.pctc if self.pctc is not None else "")
+
+
+def _berth_http(**kw):
+    return FakeHTTP(pnct=_fixture("berth_pnct_20260806.xml"),
+                    pctc=_fixture("berth_pctc_20260806.html"), **kw)
+
+
+BERTH_CFG = {"berth_plan": True, "excluded_routes": ["PXS", "PQS", "JWKP"]}
+
+
+def test_berth_schedule():
+    print("\n[25] 0.6 선석배정 게이트 — 터미널이 항차의 진실")
+    try:
+        import app_upload as au
+        import berth_schedule as bs
+    except Exception as exc:
+        check("berth_schedule 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+
+    # (1) PNCT 실응답 판독 — 값 형식 확정
+    rows, why, notes = bs.parse_pnct(_fixture("berth_pnct_20260806.xml"), now_ms=BERTH_NOW)
+    check("PNCT — 실응답 28줄을 읽는다", rows is not None and len(rows) == 28,
+          why or "%d줄" % len(rows or []))
+    by = {r["master_vvd"]: r for r in (rows or [])}
+    obwh = by.get("OBWH090") or {}
+    check("PNCT — 선사항차 짝 OBWH090(2705E/2706W) → voy_d/voy_l",
+          obwh.get("voy_d") == "2705E" and obwh.get("voy_l") == "2706W",
+          "%s/%s" % (obwh.get("voy_d"), obwh.get("voy_l")))
+    check("PNCT — 선박코드는 VVD 앞 4자", obwh.get("vessel_code") == "OBWH")
+    check("PNCT — &#32; 를 푼 선박명", obwh.get("vessel_name") == "OCEAN BLUE WHALE",
+          repr(obwh.get("vessel_name")))
+    check("PNCT — 시각 2026/08/05 10:00 → 2026-08-05 10:00",
+          obwh.get("etb") == "2026-08-05 10:00" and obwh.get("atd") == "2026-08-05 18:30",
+          "%s · %s" % (obwh.get("etb"), obwh.get("atd")))
+    check("PNCT — ATD 가 지난 항차는 departed", obwh.get("departed") is True
+          and obwh.get("status") == "departed")
+    check("PNCT — 한쪽만 있는 짝 ATPR033(/2636W)",
+          (by.get("ATPR033") or {}).get("voy_d") == ""
+          and (by.get("ATPR033") or {}).get("voy_l") == "2636W")
+    check("PNCT — 예정 항차는 planned · departed 아님",
+          (by.get("TNJP059") or {}).get("status") == "planned"
+          and (by.get("TNJP059") or {}).get("departed") is False)
+    check("PNCT — 남/북 항차 NSDC009(2607N/2608S)",
+          (by.get("NSDC009") or {}).get("voy_d") == "2607N"
+          and (by.get("NSDC009") or {}).get("voy_l") == "2608S")
+    check("PNCT — 선석 번호가 없는 표기(T2)는 berth 를 비우고 원문만 남긴다",
+          obwh.get("berth") == "" and obwh.get("berth_raw") == "T2"
+          and obwh.get("pier") == "PNCT",
+          "%r / %r" % (obwh.get("berth"), obwh.get("berth_raw")))
+
+    # (2) PCTC 실응답 판독
+    rows2, why2, notes2 = bs.parse_pctc(_fixture("berth_pctc_20260806.html"), now_ms=BERTH_NOW)
+    check("PCTC — 실응답 21줄을 읽는다", rows2 is not None and len(rows2) == 21,
+          why2 or "%d줄" % len(rows2 or []))
+    by2 = {r["master_vvd"]: r for r in (rows2 or [])}
+    stmj = by2.get("STMJ-0007-") or {}
+    check("PCTC — 하이픈 짝 2643E-2644W → voy_d/voy_l",
+          stmj.get("voy_d") == "2643E" and stmj.get("voy_l") == "2644W")
+    check("PCTC — 모선항차 앞 4자가 선박코드", stmj.get("vessel_code") == "STMJ")
+    check("PCTC — 완료 막대 + 출항시각이 지남 = departed",
+          stmj.get("departed") is True and stmj.get("status") == "departed")
+    check("PCTC — 계획완료 막대 + 접안시각이 지남 = working",
+          (by2.get("PCSZ-0023-") or {}).get("status") == "working")
+    check("PCTC — 계획완료 막대라도 접안 전이면 planned",
+          (by2.get("SWSP-0007-") or {}).get("status") == "planned")
+    check("PCTC — 선석 8B → 앱 규약 '동부두 8번선석'(isValidBerth 통과)",
+          stmj.get("berth") == "동부두 8번선석" and stmj.get("berth_raw") == "8B"
+          and stmj.get("pier") == "PCTC", repr(stmj.get("berth")))
+    check("PCTC — 방향이 안 맞는 짝은 비운다(2606N-2606N · 2605W-2605W)",
+          (by2.get("SWSP-0007-") or {}).get("voy_l") == ""
+          and (by2.get("KBTR-0001-") or {}).get("voy_d") == ""
+          and (by2.get("KBTR-0001-") or {}).get("voy_l") == "2605W"
+          and any("2606N" in n for n in notes2))
+    check("PCTC — 선사항차가 '-' 인 줄(유조선)은 짝 없이 통과",
+          (by2.get("HDOT-0036-") or {}).get("voy_d") == ""
+          and (by2.get("HDOT-0036-") or {}).get("voy_l") == "")
+
+    # (3) 요청은 터미널당 딱 한 번 · 본문·헤더 모양
+    http = _berth_http()
+    rows3, why3 = bs.fetch_all(BERTH_CFG, None, opener=http, now_ms=BERTH_NOW)
+    check("조회는 사이클당 터미널별 1회", len(http.calls) == 2, "%d회" % len(http.calls))
+    check("PNCT 는 POST + 넥사크로 ds_cond 본문",
+          "selectVslList.do" in http.calls[0][0] and "STR_DATE" in http.calls[0][1]
+          and "text/xml" in json.dumps(http.calls[0][2]).lower())
+    check("PCTC 는 GET(본문 없음)", "berthScheduleG" in http.calls[1][0]
+          and http.calls[1][1] == "")
+    check("타임아웃 20초", all(c[3] == 20 for c in http.calls))
+    check("두 터미널 합계 49줄", rows3 is not None and len(rows3) == 49,
+          why3 or "%d줄" % len(rows3 or []))
+    check("비관할 항로(PXS·PQS·JWKP)에 excluded 표시",
+          all(r["excluded"] == (r["route"] in ("PXS", "PQS", "JWKP")) for r in rows3))
+
+    # (4) 한쪽이라도 실패하면 배정표를 주지 않는다(반쪽으로 지우지 않기)
+    for boom in ("PNCT", "PCTC"):
+        bad = _berth_http(boom=[boom])
+        rows4, why4 = bs.fetch_all(BERTH_CFG, None, opener=bad, now_ms=BERTH_NOW)
+        check("%s 실패 사이클은 배정표 없음 + 사유" % boom,
+              rows4 is None and bool(why4) and boom in why4, str(why4))
+    empty = FakeHTTP(pnct="<Root/>", pctc="<html></html>")
+    rows5, why5 = bs.fetch_all(BERTH_CFG, None, opener=empty, now_ms=BERTH_NOW)
+    check("빈 응답도 조용히 넘기지 않고 사유를 남긴다", rows5 is None and bool(why5), str(why5))
+
+    plan = au.BerthPlan(rows3)
+
+    # (5) 항차 대조는 정수 비교(0패딩 흔들림) — 0.5-01 voy_ident 재사용
+    check("대조 — 표기가 달라도 같은 항차면 찾는다(0221E ≡ 221E)",
+          plan.find("DJCT", ["221E"]) is not None
+          and plan.find("DJCT", ["0221E"]) is not None)
+    check("대조 — 짝의 반대쪽으로도 찾는다(0222W → 같은 줄)",
+          (plan.find("DJCT", ["0222W"]) or {}).get("voy_d") == "0221E")
+    check("대조 — 배정표에 없는 항차는 None", plan.find("DJCT", ["9999E"]) is None
+          and plan.find("ZZZZ", ["1E"]) is None)
+
+    # (6) 등록 게이트
+    cache = {"names": {}, "codes": {}, "tally": {}, "pairs": {}}
+    ok_new, _r = au.registration_gate(plan, cache, "TNJP", ["26358E"])
+    check("게이트 — 배정표에 있고 아직 안 나간 항차는 등록한다", ok_new)
+    ok_dep, why_dep = au.registration_gate(plan, cache, "TNJP", ["26354E"])
+    check("게이트 — 이미 나간 항차는 새 카드를 만들지 않는다(TNJP 26354E)",
+          not ok_dep and "출항" in why_dep, why_dep)
+    ok_ex, why_ex = au.registration_gate(plan, cache, "NGTR", ["2645E"])
+    check("게이트 — 비관할 항로(PXS)는 새 카드를 만들지 않는다",
+          not ok_ex and "비관할" in why_ex, why_ex)
+    ok_out, _r = au.registration_gate(plan, cache, "MCAP", ["631S"])
+    check("게이트 — 배정표에 없는 선박은 종전대로 받는다(fail-open)", ok_out)
+    ok_none, _r = au.registration_gate(None, cache, "TNJP", ["26354E"])
+    check("게이트 — 배정표를 못 받았으면 아무도 막지 않는다", ok_none)
+
+    # (7) 기항 마감(DEP.TALLY)
+    fresh = au.mark_closed("XTPG-534E&534W PTK DEP.TALLY REPORT.pdf", "XTPG", "534E", cache)
+    check("DEP.TALLY — 제목·첨부명에서 마감을 읽고 짝까지 닫는다",
+          set(fresh) == {"534E", "534W"}, str(fresh))
+    check("DEP.TALLY — 표기가 달라도 같은 항차면 마감으로 본다(0534W)",
+          bool(au.is_closed(cache, "XTPG", ["0534W"])))
+    check("DEP.TALLY — 두 번째 메일은 새 마감이 아니다(로그 폭주 방지)",
+          au.mark_closed("XTPG 534E DEP TALLY", "XTPG", "534E", cache) == [])
+    ok_cl, why_cl = au.registration_gate(plan, cache, "XTPG", ["0534W"])
+    check("게이트 — 마감된 항차는 새 카드를 만들지 않는다",
+          not ok_cl and "마감" in why_cl, why_cl)
+    check("DEP.TALLY — 그냥 'TALLY REPORT' 는 마감이 아니다",
+          au.mark_closed("STSE 2657E&2658W PTK TALLY REPORT.xlsx", "STSE", "2657E", cache) == [])
+
+    # (8) 배정표 짝 승격 — 갈라진 카드를 한 장으로 되돌리는 근거
+    lines = []
+    got = au.promote_pairs(plan, cache, lines.append)
+    check("짝 승격 — 배정표의 선사항차 짝을 캐시에 올린다",
+          au.paired_partner(cache, "TNJP", "26354E") == "26354W"
+          and au.paired_partner(cache, "PCSZ", "2623E") == "2625W" and got > 0,
+          "%d건" % got)
+    check("짝 승격 — 비관할 항로는 올리지 않는다",
+          au.paired_partner(cache, "NGTR", "2645E") == "")
+    check("짝 승격 — 두 번째 호출은 0건(멱등)", au.promote_pairs(plan, cache, lines.append) == 0)
+
+    # (9) info 보강 — 검수앱 계약(src/badgeRule.js · HomePage planDate)
+    fresh_f, refresh_f = au.plan_info_fields(by.get("OBWH090"))
+    check("보강 — planDate 는 '접안 ~ 출항'(실적 우선)",
+          refresh_f.get("planDate") == "2026-08-05 10:00 ~ 2026-08-05 18:30",
+          refresh_f.get("planDate"))
+    check("보강 — planSrc 는 plan", refresh_f.get("planSrc") == "plan")
+    check("보강 — terminalStatus 는 앱 계약값만",
+          refresh_f.get("terminalStatus") in ("departed", "working", "planned"))
+    check("보강 — vslFull 은 빈칸일 때만 채운다(fresh)",
+          fresh_f.get("vslFull") == "OCEAN BLUE WHALE" and "vslFull" not in refresh_f)
+    _f2, r2 = au.plan_info_fields(by2.get("STMJ-0007-"))
+    check("보강 — PCTC 는 부두·선석까지 채운다",
+          r2.get("pier") == "PCTC" and r2.get("berth") == "동부두 8번선석")
+    _f3, r3 = au.plan_info_fields(by2.get("XTPG-0029-"))
+    check("보강 — 출항 시각이 없으면 planDate 를 아예 안 보낸다(지어내지 않는다)",
+          "planDate" not in r3 and r3.get("terminalStatus") == "planned")
+
+    _berth_reconcile(au, plan, http)
+
+
+def _live_keys():
+    """라이브(2026-08-06)에 실제로 올라가 있던 37키를 그대로 세운다 — 검수 흔적 없음·자동등록."""
+    live = {
+        "ATPR_2635E": ("2635E", ""), "ATPR_2635W": ("", "2635W"), "ATPR_2636W": ("", "2636W"),
+        "DJCT_0221E": ("0221E", "0222W"), "DXQD_2629W": ("", "2629W"),
+        "DXQD_2630E": ("2630E", "2630W"), "KSKM_2615S": ("", "2615S"),
+        "MCAP_631S": ("", "631S"), "NSDC_2607N": ("2607N", ""), "NSFR_2615N": ("2615N", ""),
+        "OBWH_2701E": ("2701E", "2702W"), "OBWH_2703E": ("2703E", "2704W"),
+        "OBWH_2705E": ("2705E", "2706W"), "PCSG_2639E": ("2639E", ""),
+        "PCSG_2640E": ("2640E", ""), "PCSG_2640W": ("", "2640W"), "PCSG_2641W": ("", "2641W"),
+        "PCSZ_2623E": ("2623E", ""), "PCSZ_2625W": ("", "2625W"),
+        "RZOR_R081E": ("R081E", "R081W"), "RZOR_R082E": ("R082E", "R082W"),
+        "RZOR_R083E": ("R083E", "R083W"), "STMJ_2643E": ("2643E", ""),
+        "STMJ_2644W": ("", "2644W"), "STSE_2657E": ("2657E", "2658W"),
+        "SWDN_2608N": ("2608N", ""), "SWRG_2607N": ("2607N", ""), "SWSP_2606N": ("2606N", ""),
+        "TMPZ_2023E": ("2023E", "2023W"), "TMPZ_2025E": ("2025E", ""),
+        "TNJP_26354E": ("26354E", ""), "TNJP_26354W": ("", "26354W"),
+        "TNJP_26355E": ("26355E", ""), "TNJP_26355W": ("", "26355W"),
+        "XTPG_534E": ("534E", "534W"), "XTPG_535E": ("535E", ""), "YKTD_2612E": ("2612E", ""),
+    }
+    data = {}
+    for key, (voy_d, voy_l) in live.items():
+        code, voy = key.split("_", 1)
+        extra = {}
+        if voy_d:
+            extra["voy_d"] = voy_d
+        if voy_l:
+            extra["voy_l"] = voy_l
+        data["voyages/%s/info" % key] = _auto_info(code, voy, **extra)
+    return data
+
+
+def _berth_reconcile(au, plan, http):
+    """(10) 라이브 37키를 그대로 세워 놓고 정리 한 판 — 병합·제거·보류·멱등."""
+    cache = {"names": {}, "codes": {}, "tally": {}, "pairs": {}}
+    data = _live_keys()
+    data["voyages/TNJP_26355E/records"] = {"r1": {"cn": "ZZZU9999999", "by": "김성일"}}
+    db = FakeDB(data)
+    lines = []
+    out = au.reconcile_with_plan(db, cache, plan, lines.append)
+    text = "\n".join(lines)
+
+    merged = {dup for dup, _canon in out["merged"]}
+    check("정리 — 갈라진 짝을 배정표 근거로 한 장에 합친다(TNJP 26354W · STMJ 2644W · PCSZ 2625W)",
+          {"TNJP_26354W", "STMJ_2644W", "PCSZ_2625W"} <= merged, str(sorted(merged)))
+    check("정리 — 이미 나간 항차 카드를 치운다(OBWH 2701E/2703E/2705E · RZOR 3장 · DJCT 0221E)",
+          {"OBWH_2701E", "OBWH_2703E", "OBWH_2705E", "RZOR_R081E", "RZOR_R082E",
+           "RZOR_R083E", "DJCT_0221E", "TMPZ_2023E", "DXQD_2630E", "ATPR_2635E",
+           "ATPR_2635W", "ATPR_2636W", "STMJ_2643E", "TNJP_26354E"} <= set(out["deleted"]),
+          str(sorted(out["deleted"])))
+    check("정리 — 검수 흔적이 있으면 나갔어도 지우지 않고 보고만 한다(TNJP 26355E)",
+          "TNJP_26355E" in out["held"] and "TNJP_26355E" not in out["deleted"])
+    check("정리 — 지우기 전에 대상 전체 목록을 로그에 남긴다",
+          "지난 항차 카드" in text and "OBWH_2705E" in text)
+    check("정리 — 배정표에 없는 항차는 손대지 않는다(MCAP 631S · KSKM 2615S · YKTD 2612E)",
+          not ({"MCAP_631S", "KSKM_2615S", "YKTD_2612E", "SWRG_2607N", "STSE_2657E",
+                "XTPG_534E", "DXQD_2629W"} & set(out["deleted"] + out["held"])))
+    check("정리 — 비관할 항로(PQS) 항차는 판단을 미루고 그대로 둔다(PCSG 4장)",
+          not ({"PCSG_2639E", "PCSG_2640E", "PCSG_2640W", "PCSG_2641W"}
+               & set(out["deleted"] + out["held"] + [d for d, _c in out["merged"]])))
+    check("정리 — 실패 0건", out["errors"] == 0, str(out["errors"]))
+
+    # 37장 → 19장. 라이브라면 18장이지만 이 시험은 TNJP_26355E 에 검수 기록을 일부러 심어
+    #   '나갔어도 흔적이 있으면 안 지운다'를 증명하므로 그 한 장이 더 남는다.
+    left = sorted(k.split("/")[1] for k in db.data if k.endswith("/info"))
+    check("정리 뒤 남은 카드 19장(37 → 19 · 흔적 있는 1장 포함)",
+          len(left) == 19, "%d장: %s" % (len(left), ", ".join(left)))
+
+    info = db.data.get("voyages/NSDC_2607N/info") or {}
+    check("보강 — 배정표가 빈 짝을 채운다(NSDC 2607N → voy_l 2608S)",
+          info.get("voy_l") == "2608S", json.dumps(info, ensure_ascii=False))
+    check("보강 — 작업(예정)일시·상태·부두가 채워진다",
+          info.get("planDate") == "2026-08-07 21:00 ~ 2026-08-08 05:00"
+          and info.get("planSrc") == "plan" and info.get("terminalStatus") == "planned"
+          and info.get("pier") == "PNCT", json.dumps(info, ensure_ascii=False))
+    check("보강 — 사람이 넣은 값(vsl·createdBy·autoRegistered)은 그대로",
+          info.get("createdBy") == "자동등록(수집기)" and info.get("vsl") == "NSDC"
+          and info.get("autoRegistered") is True)
+    merged_info = db.data.get("voyages/PCSZ_2623E/info") or {}
+    check("병합 — 정본 카드가 양쪽 항차를 다 갖는다(PCSZ 2623E + 2625W)",
+          merged_info.get("voy_d") == "2623E" and merged_info.get("voy_l") == "2625W"
+          and merged_info.get("terminalStatus") == "working")
+    check("null 을 보내지 않는다", not _nulls([c[2] for c in db.calls if c[0] in ("PUT", "PATCH")]))
+
+    # 멱등 — 한 번 더 돌려도 지우거나 합칠 것이 없다
+    before = len(db.calls)
+    out2 = au.reconcile_with_plan(db, cache, plan, lines.append)
+    check("정리 — 두 번째 판은 병합 0 · 삭제 0(멱등)",
+          not out2["merged"] and not out2["deleted"] and out2["errors"] == 0,
+          "%s / %s" % (out2["merged"], out2["deleted"]))
+    check("멱등 — 두 번째 판은 쓰기(PUT/PATCH/DELETE)가 없다",
+          not [c for c in db.calls[before:] if c[0] in ("PUT", "PATCH", "DELETE")],
+          str([c[:2] for c in db.calls[before:] if c[0] in ("PUT", "PATCH", "DELETE")]))
+
+    _berth_cycle(au, http)
+
+
+def _berth_cycle(au, http):
+    """(11) 종단 — 사이클 한 판에서 게이트가 새 카드를 막고, 폴더·파일은 그대로인지."""
+    tmp = tempfile.mkdtemp(prefix="mailpilot_berth_")
+    try:
+        root = os.path.join(tmp, "MB")
+        dis = _syn_baplie("26354E", [("AAAU1000001", "2200", "CNSHA", "KRPTK", "0100284")])
+        load = _syn_baplie("26358W", [("BBBU2000001", "2200", "KRPTK", "CNSHA", "0200284")])
+        _mk(root, "TNJP/26354E/TNJP 26354E PTK.edi", dis)      # 이미 나간 항차
+        _mk(root, "TNJP/26358E/TNJP 26358E PTK.edi", dis)      # 배정표에 있는 앞으로의 항차
+        _mk(root, "NGTR/2645E/NGTR 2645E PTK.edi", dis)        # 비관할 항로(PXS)
+        _mk(root, "MCAP/631S/MCAP 631S PTK.edi", load)         # 배정표에 없는 선박(fail-open)
+        master = [{"code": c, "name": c, "aliases": [], "ko": []}
+                  for c in ("TNJP", "NGTR", "MCAP")]
+        db = FakeDB({})
+        cache = {"names": {}, "codes": {}, "tally": {}, "pairs": {}}
+        lines = []
+        cfg = dict(BERTH_CFG)
+        cfg["home_port_aliases"] = ["PTK", "KRPTK"]
+        state_path = os.path.join(tmp, "upload_state.json")
+        res = au.run(root, cache, master, db, cfg, lines.append, state_path=state_path,
+                     opener=http, now_ms=BERTH_NOW)
+        keys = sorted(k.split("/")[1] for k in db.data if k.endswith("/info"))
+        check("종단 — 이미 나간 항차·비관할 항로는 카드를 만들지 않는다",
+              keys == ["MCAP_631S", "TNJP_26358E"], str(keys))
+        check("종단 — 막은 항차를 로그와 결과에 남긴다",
+              set(res["blocked"]) == {"TNJP_26354E", "NGTR_2645E"}, str(res["blocked"]))
+        check("종단 — 배정표에 없는 선박은 종전대로 올라간다(fail-open)",
+              "voyages/MCAP_631S/loading/ediContainers" in db.data)
+        check("종단 — 배정표가 새 카드에 일정을 실어 준다",
+              (db.data.get("voyages/TNJP_26358E/info") or {}).get("planSrc") == "plan"
+              and (db.data.get("voyages/TNJP_26358E/info") or {}).get("voy_l") == "26358W")
+        check("종단 — 폴더·파일은 그대로다(막았다고 지우지 않는다)",
+              os.path.isfile(os.path.join(root, "TNJP", "26354E", "TNJP 26354E PTK.edi"))
+              and os.path.isfile(os.path.join(root, "NGTR", "2645E", "NGTR 2645E PTK.edi")))
+
+        # 배정표를 못 받은 사이클 — 게이트도 정리도 하지 않는다(자료를 잃지 않는 쪽)
+        db2 = FakeDB({})
+        lines2 = []
+        bad = FakeHTTP(pnct=_fixture("berth_pnct_20260806.xml"),
+                       pctc=_fixture("berth_pctc_20260806.html"), boom=["PCTC"])
+        res2 = au.run(root, {"names": {}, "codes": {}, "tally": {}, "pairs": {}}, master, db2,
+                      cfg, lines2.append, state_path=os.path.join(tmp, "s2.json"),
+                      reconcile=True, opener=bad, now_ms=BERTH_NOW)
+        keys2 = sorted(k.split("/")[1] for k in db2.data if k.endswith("/info"))
+        check("배정표 실패 — 게이트 없이 종전대로 돈다(0.5-01 회귀)",
+              keys2 == ["MCAP_631S", "NGTR_2645E", "TNJP_26354E", "TNJP_26358E"], str(keys2))
+        check("배정표 실패 — 정리(삭제)를 아예 하지 않는다",
+              res2["planReconciled"] is False
+              and not [c for c in db2.calls if c[0] == "DELETE"])
+        check("배정표 실패 — 사유를 로그 한 줄로 남긴다(조용한 실패 금지)",
+              any("배정표를 받지 못해" in l for l in lines2), "")
+        check("설정에서 끄면 바깥 사이트를 아예 부르지 않는다",
+              au.fetch_plan({"berth_plan": False}, None)[0] is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -2524,6 +2901,8 @@ def main():
     # 시험은 이 PC 에 놓인 실제 정본표를 읽지 않는다 — 기본값은 '정본표 없음'(0.3 회귀 기준).
     # 정본표가 필요한 시험(17~19)은 스스로 픽스처·임시 파일을 넘겨 쓴다.
     core.MASTER_PATH = os.path.join(tempfile.gettempdir(), "mailpilot_시험_정본표없음.json")
+    # 0.5-01 교훈 — 시험 로그가 실 수집기 로그 폴더를 더럽히지 않게 임시 폴더로 돌린다.
+    core.LOG_DIR = tempfile.mkdtemp(prefix="mailpilot_시험로그_")
     test_read_table()
     test_code_stability()
     test_firebase_parser()
@@ -2548,6 +2927,7 @@ def main():
     test_app_upload_e2e()
     test_heartbeat_shape()
     test_voyage_spelling()
+    test_berth_schedule()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

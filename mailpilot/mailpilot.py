@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.5-01"
+VERSION = "MailPilot Uni 0.6"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -222,6 +222,9 @@ DEFAULT_CONFIG = {
     "mailbox_root": "",
     "collect_days": 7,
     "poll_minutes": 10,
+    # 0.6 — 터미널 선석배정(공개 조회) 사용 여부와 비관할 항로(등록 제외, 검수사 확정)
+    "berth_plan": True,
+    "excluded_routes": ["PXS", "PQS", "JWKP"],
     "firebase": {},
 }
 
@@ -1336,6 +1339,7 @@ class Collector:
         self.cache = load_cache(self.cache_path)
         self.master = load_master(self.master_path)
         self._migrated = False                       # 기동 후 첫 사이클 직전에 한 번만 이관
+        self._plan_reconciled = False                # 0.6 — 배정표로 서버 항차 맞추기(기동 후 1회)
         self.uidl_cache = load_uidl_cache(self.uidl_cache_path)
         self.firebase = firebase if firebase is not None else FirebaseREST(self.cfg.get("firebase"))
         try:
@@ -1407,13 +1411,17 @@ class Collector:
         try:
             result = app_upload.run(root, self.cache, self.master, self.firebase, self.cfg,
                                     lambda msg: log(msg, self.log_dir),
-                                    state_path=self.upload_state_path)
+                                    state_path=self.upload_state_path,
+                                    reconcile=not self._plan_reconciled)
         except Exception as exc:
             log("앱 채우기 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc), self.log_dir)
             summary["errors"] += 1
             return None
+        if result.get("planReconciled"):
+            self._plan_reconciled = True             # 0.6 — 배정표 정리는 기동 후 한 번이면 된다
         summary["appVoyages"] = list(result.get("registered") or [])
         summary["appUploads"] = result.get("uploads", 0)
+        summary["appBlocked"] = list(result.get("blocked") or [])
         summary["errors"] += result.get("errors", 0)
         return result
 
@@ -1531,6 +1539,11 @@ class Collector:
                                              context_voy=target["voyage"])
             for dis, load in fresh:
                 log("짝 확인: %s %s ↔ %s" % (target["code"], dis, load), self.log_dir)
+            # 0.6 — 'DEP.TALLY'(마감 텔리)가 적힌 메일은 그 항차의 기항이 끝났다는 신호다.
+            #   폴더 적재는 그대로 하고, **새 항차 카드 만들기**만 막는다.
+            app_upload.mark_closed(" ".join([subject or ""] + names), target["code"],
+                                   target["voyage"], self.cache,
+                                   lambda msg: log(msg, self.log_dir))
             if tally_enabled(self.cache, target["code"]):
                 parts = [target["code"]]
             else:

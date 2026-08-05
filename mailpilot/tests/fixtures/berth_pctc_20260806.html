@@ -1,0 +1,3428 @@
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="ko_KR">
+<head>
+	<!-- Meta Tags -->
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,
+                height=device-height,
+                initial-scale=1,
+                minimum-scale=1,
+                shrink-to-fit=no">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<meta name="viewport" content="width=device-width"/>
+
+	<link rel="stylesheet" href="/resources/css/datatables/datatables.min.css"/>
+	
+
+
+<link rel="stylesheet" href="/resources/css/common/reset.css"/>
+<link rel="stylesheet" href="/resources/css/common/ngel-layout.css"/>
+<link rel="stylesheet" href="/resources/css/common/ngel-button.css"/>
+<link rel="stylesheet" href="/resources/css/common/ngel-modal.css"/>
+<link rel="stylesheet" href="/resources/css/esvc/common.css"/>
+	<link rel="stylesheet" href="/resources/css/esvc/esvc.css"/>
+
+	
+
+
+ 
+<link rel="shortcut icon" href="/resources/favicon/favicon.ico" type="image/x-icon">
+<link rel="icon" href="/resources/favicon/favicon.ico" type="image/x-icon">
+<link rel="manifest" href="/resources/favicon/site.webmanifest">
+
+
+
+	<title>
+		선석배정 차트
+		< 본선작업
+		< PCTC
+	</title>
+
+	
+
+<script type="text/javascript" src="/resources/js/jquery/jquery-1.12.4.min.js"></script>
+<script type="text/javascript" src="/resources/js/jquery/jquery-ui.min.js"></script>
+<script type="text/javascript" src="/resources/js/jquery/jquery.twbsPagination.js"></script>
+<script type="text/javascript" src="/resources/js/jquery/jquery.blockUI.js"></script>
+<script type="text/javascript" src="/resources/js/common/TweenMax.min.js"></script>
+<script type="text/javascript" src="/resources/js/common/common.js"></script>
+<script type="text/javascript" src="/resources/js/common/ngel-modal.js"></script>
+
+<script type="text/javascript">
+    function getContextPath () {
+        return '';
+    }
+</script>
+	<script src="/resources/js/datatables/datatables.js"></script>
+</head>
+
+<body>
+<header>
+	
+
+
+
+<div class="top-wrap">
+	<div class="top-nav">
+		<div class="home" onclick="location.href='/'">HOME</div>
+		<div class="join">
+            
+			<div class="lang">
+				<a href="javascript: void(0);" id="lang" class="no" onclick="changeLanguage($(this).text().trim())">
+                    ENG
+                </a>
+            </div>
+			<div class="v-line"></div>
+            
+                
+                
+                    <a href="/esvc/membership/login">
+                        로그인
+                    </a>
+                    <div class="v-line"></div>
+                    <a href="/esvc/membership/memberJoin">회원가입</a>
+                
+            
+        </div>
+	</div>
+</div>
+
+<div class="container">
+    <h1>
+        <a href="/esvc">
+        	<img alt="PCTC-ESERVICE" src="/resources/images/esvc/esvc_logo.png"/>
+        </a>
+    </h1>
+
+    <nav class="lnb">
+        <ul>
+            
+            <li class="t-menu vessel">
+                <a href="/esvc/vessel/" class="top-menu">
+                	본선작업
+                </a>
+            </li>
+            <li class="t-menu yard">
+                <a href="/esvc/yard/" class="top-menu">
+                	야드 현황
+                </a>
+            </li>
+            <li class="t-menu edocu">
+                <a href="/esvc/edocu/" class="top-menu">
+                	전자문서
+                </a>
+            </li>
+            <li class="t-menu quarantine">
+                <a href="/esvc/quarantine/" class="top-menu">
+                	검역/검사
+                </a>
+            </li>
+            <li class="t-menu cntr">
+                <a href="/esvc/cntr/" class="top-menu">
+                	컨테이너
+                </a>
+            </li>            
+            <li class="t-menu">
+                <a href="/esvc/codeChk/" class="top-menu">
+                	코드조회
+                </a>
+            </li>
+            
+        </ul>
+    </nav>
+</div>
+
+<script type="text/javascript">
+    var SUB_LIST_ITEM_HEIGHT = 2.125;
+
+    function getRem (number) {
+        var baseFontSize = $('body').css('font-size');
+        return baseFontSize * number;
+    }
+
+    var arrayMenuHeights = [];
+    function initializeMenus () {
+        var maxMenuHeight = 0;
+
+        $('header .lnb > ul > li > a + ul').each(function (index) {
+            // Get count of list items.
+            var countItems = $(this).find('li').length;
+            // console.log('[initializeMenus] Count of list(' + index + '): ' + countItems);
+
+            // Set maximum value of counts.
+            if (countItems > maxMenuHeight) maxMenuHeight = countItems;
+
+            // Set count of items to each lists.
+            arrayMenuHeights[arrayMenuHeights.length] = countItems;
+        });
+
+        // Set height of list with window width.
+        if ($(window).width() > 991) {
+            // Reset selection of list.
+            $('header .lnb > ul > li > a')
+                .removeClass('active');
+
+            $('header .lnb > ul > li > a + ul')
+                .css('height', (maxMenuHeight * SUB_LIST_ITEM_HEIGHT) + 2.5 + 'rem')
+                .removeClass('active');
+        } else {
+            $('header .lnb > ul > li > a + ul').css('height', 0);
+        }
+    }
+
+    function changeLanguage (languageSelect) {
+        console.log('[changeLanguage] languageSelect: ' + languageSelect);
+        var newUrl = '';
+        var nowUrl = location.href;
+
+        var lang = languageSelect === 'KOR' ? 'ko' : 'en';
+        console.log('[changeLanguage] lang: ' + lang);
+
+        if (nowUrl.indexOf('?') === -1) {
+            // If parameter does not exist
+            newUrl = nowUrl + '?lang=' + lang;
+        } else {
+            // If parameters exists
+
+            if (nowUrl.indexOf('lang=') === -1) {
+                // If user never changed language.
+                newUrl = nowUrl + '&lang=' + lang;
+            } else {
+                // If user changed language.
+
+                // Replace language
+                var params_full = nowUrl.split('?');
+                var params = params_full[1].split('&');
+                for (var i = 0; i < params.length; i++) {
+                    if (params[i].indexOf('lang=') !== -1) {
+                        var language = params[i].split('=');
+                        language[1] = lang;
+                        params[i] = language[0] + '=' + language[1];
+                    }
+                }
+
+                newUrl = params_full[0] + '?';
+                for (var j = 0; j < params.length; j++) {
+                    newUrl = newUrl + params[j] + '&';
+                }
+                newUrl = newUrl.substring(0, newUrl.length - 1);
+            }
+        }
+
+        
+        location.href = newUrl;
+    }
+
+    function toggleAllMenu () {
+        console.log('[toggleAllMenu] width of window: ' + $(window).width());
+        if ($(window).width() < 992) {
+            if (!$('header .lnb').hasClass('active')) {
+                $('header .lnb').addClass('active');
+                $('#button-open-all-menu').addClass('active');
+                $('.popup-backdrop').addClass('active');
+            } else {
+                closeAllMenu();
+            }
+        }
+    }
+
+    function closeAllMenu () {
+        $('header .lnb').removeClass('active');
+        $('#button-open-all-menu').removeClass('active');
+        $('.popup-backdrop').removeClass('active');
+    }
+
+    function openSubMenu ($element) {
+        // Get index of list.
+        var $parent = $element.parent();
+        var index = $('header .lnb > ul > li').index($parent);
+        console.log('[openSubMenu] Index: ' + index);
+
+        // Initialize height of list.
+        $('header .lnb > ul > li > a + ul')
+            .removeClass('active')
+            .css('height', 0);
+
+        // Set height of list.
+        $element.siblings('ul')
+            .addClass('active')
+            .css('height', ((arrayMenuHeights[index] * SUB_LIST_ITEM_HEIGHT) + 0.75) + 'rem');
+
+        // Initialize color of $element.
+        $('header .lnb > ul > li > a')
+            .removeClass('active');
+
+        // Set color of $element.
+        $element
+            .addClass('active');
+    }
+
+    function lnbAction ($element, url) {
+        if ($(window).width() > 991) {
+            location.href = url;            	
+        } else {
+            openSubMenu($element);
+        }
+    }
+
+    $(document).ready(function () {
+
+        $('#changeMode').on('click', function () {
+            changeMode();
+        });
+
+        if('') {
+            actionSubmit({
+                url: '/esvc/membership/getUserInfo',
+                method: 'GET',
+                success: function (result) {
+                    $('.userName').text(result.userName);
+                }
+            });
+        }
+
+        initializeMenus();
+
+        // modal-layer - sitemap
+        $('#btn-sitemap').click(function() {
+        	$('#sitemap').css('display','none');
+        });
+        $('.btn-close').click(function() {
+        	$('#sitemap').css('display','none');
+        });
+        
+        
+     	// header menu 및 sub menu
+        $('.t-menu').on('click', function() {
+        	$('.t-menu').removeClass('active');
+        	$(this).addClass('active');
+        	
+        	// 인덱스 값에 맞는 콘텐츠 노출
+        	var idx = $('.t-menu').index(this);
+        	
+        	console.log("idx",idx);
+        	
+        	$('.s-menu').hide();
+        	$('.s-menu').eq(idx).show();
+        });
+     	
+     	// sub menu
+        $('.s-menu ul li').on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$(this).addClass('active');
+        });
+     	
+     	// header menu별 해당 sub menu 첫번째로 이동시     	
+        $('.t-menu').eq(0).on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$('.s-menu ul li').eq(0).addClass('active');
+        });
+        
+        $('.t-menu').eq(1).on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$('.s-menu ul li').eq(7).addClass('active');
+        });
+        
+        $('.t-menu').eq(2).on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$('.s-menu ul li').eq(11).addClass('active');
+        });
+        
+        $('.t-menu').eq(3).on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$('.s-menu ul li').eq(14).addClass('active');
+        });
+        
+        $('.t-menu').eq(4).on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$('.s-menu ul li').eq(16).addClass('active');
+        });
+        
+        $('.t-menu').eq(5).on('click', function() {
+        	$('.s-menu ul li').removeClass('active');
+        	$('.s-menu ul li').eq(19).addClass('active');
+        });
+    })
+
+
+    function changeMode() {
+        console.log('cc');
+        location.href = "/esvc?mode=mobile";
+    }
+
+    function showSpinner() {
+        document.getElementsByClassName('layerPopup')[0].style.display='block';
+    }
+    function hideSpinner() {
+        document.getElementsByClassName('layerPopup')[0].style.display='none';
+    }
+</script>
+</header>
+
+<aside class="vessel">
+	
+
+
+
+
+<nav class="snb">
+  <ul class="container">
+    <li class="s-menu vessel">
+      <ul>
+        <li class="vesselStatus"><a href="/esvc/vessel/vesselStatus">본선작업 현황</a></li>
+        <li class="berthScheduleT"><a href="/esvc/vessel/berthScheduleT">선석배정 목록</a></li>
+        <li class="berthScheduleG"><a href="/esvc/vessel/berthScheduleG">선석배정 차트</a></li>
+        <li class="notInList"><a href="/esvc/vessel/notInList">미반입 목록</a></li>
+        <li class="loadingList"><a href="/esvc/vessel/loadingList">선적목록 조회</a></li>
+        <li class="dischargingList"><a href="/esvc/vessel/dischargingList">양하목록 조회</a></li>
+        <li class="voyageList"><a href="/esvc/vessel/voyageList">선박 항차 조회</a></li>
+      </ul>
+    </li>
+    <li class="s-menu yard">
+      <ul>
+        <li class="yardMap"><a href="/esvc/yard/yardMap">야드 맵</a></li>
+        <li class="gateInOutList"><a href="/esvc/yard/gateInOutList">반출입 목록</a></li>
+        <li class="yardStatus"><a href="/esvc/yard/yardStatus">야드작업 현황</a></li>
+        <li class="cargo"><a href="/esvc/yard/cargo">장치기간 경과화물</a></li>
+        <li class="emptyStatus"><a href="/esvc/yard/emptyStatus">Empty 현황</a></li>
+      </ul>
+    </li>
+    <li class="s-menu edocu">
+      <ul>
+        <li class="booking"><a href="/esvc/edocu/booking">선사 Booking</a></li>
+        <li class="copino"><a href="/esvc/edocu/copino">COPINO 정보조회</a></li>
+        <!-- <li><a href="javascript:void(0)">CLL 접수현황</a></li> -->
+        <li class="cllReception"><a href="/esvc/edocu/cllReception">CLL 수신현황</a></li>
+      </ul>
+    </li>
+    <li class="s-menu quarantine">
+      <ul>
+        <li class="lookup"><a href="/esvc/quarantine/lookup">검역/검사 조회</a></li>
+        <li class="register"><a href="/esvc/quarantine/register">검역/검사 등록</a></li>
+      </ul>
+    </li>
+    <li class="s-menu cntr">
+      <ul>
+        
+        <li class="info2"><a href="/esvc/cntr/info2">컨테이너 정보조회</a></li>
+        <li class="search"><a href="#" onclick="openEservice1()">컨테이너 찾기</a></li>
+        <li class="hsService"><a href="/esvc/cntr/hsService">현수 정산 서비스</a></li>
+        <li class="invoiceReprint"><a href="/esvc/cntr/invoiceReprint">거래명세표 재출력</a></li>
+        
+      </ul>
+    </li>
+    <li class="s-menu codeChk">
+      <ul>
+        <li class="vesselCode"><a href="/esvc/codeChk/vesselCode">선박코드</a></li>
+        <li class="sLane"><a href="/esvc/codeChk/sLane">서비스 Lane</a></li>
+        <li class="portCode"><a href="/esvc/codeChk/portCode">Port 코드</a></li>
+        <li class="sizeType"><a href="/esvc/codeChk/sizeType">컨테이너 사이즈타입</a></li>
+        <li class="compCode"><a href="/esvc/codeChk/compCode">선사 코드</a></li>
+      </ul>
+    </li>
+  </ul>
+
+  <form name="linkForm" style="display: none">
+  <input type="hidden" name="screenPath">
+  <input type="hidden" name="callType">
+  </form>
+</nav>
+
+<script type="text/javascript">
+  var snbCategoryHeight = '';
+  function initializeSnbCategory () {
+    snbCategoryHeight = ((($('#select-category').find('li').length + 1) * 2)) + 'rem';
+  }
+
+  var arraySnbPagesHeights = [];
+  function initializeSnbPages () {
+    $('#select-pages > ul').each(function (index) {
+      var countItems = $(this).find('li').length;
+      // console.log('[initializeSnbPages] Count of list(' + index + '): ' + countItems);
+
+      arraySnbPagesHeights[arraySnbPagesHeights.length] = ((countItems + 1) * 2) + 'rem';
+    });
+
+    // console.log('[initializeSnbPages] arraySnbPagesHeight: ');
+    // console.log(arraySnbPagesHeights);
+  }
+
+  var snbCategoryOpened = false;
+  function openSnbCategory () {
+    closeSnbPages();
+
+    if (snbCategoryOpened) {
+      closeSnbCategory();
+    } else {
+      $('#select-category > ul > li > a')
+      .removeAttr('tabindex');
+
+      $('#select-category')
+      .addClass('active')
+      .children('ul')
+      .css('height', snbCategoryHeight);
+
+      snbCategoryOpened = true;
+    }
+  }
+
+  function closeSnbCategory () {
+    $('#select-category > ul > li > a')
+    .attr('tabindex', -1);
+
+    $('#select-category')
+    .removeClass('active')
+    .children('ul')
+    .css('height', 0);
+
+    snbCategoryOpened = false;
+  }
+
+  var snbPagesOpened = false;
+  function openSnbPages () {
+    closeSnbCategory();
+
+    if (snbPagesOpened) {
+      closeSnbPages();
+    } else {
+      $('#select-pages > ul.selected > li > a')
+      .removeAttr('tabindex');
+
+      var targetIndex = $('#select-pages > ul').index($('ul.selected'));
+      // console.log('[openSnbPages] Target list:');
+      // console.log($('#select-pages > ul.selected'));
+
+      // console.log('[openSnbPages] targetIndex = ' + targetIndex);
+
+      $('#select-pages > ul.selected')
+      .css('height', arraySnbPagesHeights[targetIndex])
+      .parent('li')
+      .addClass('active');
+      snbPagesOpened = true;
+    }
+  }
+
+  function closeSnbPages () {
+    $('#select-pages > ul.selected > li > a')
+    .attr('tabindex', -1);
+
+    $('#select-pages > ul')
+    .css('height', 0)
+    .parent('li')
+    .removeClass('active');
+
+    snbPagesOpened = false;
+  }
+
+  function selectSnbCategory (category) {
+    $('#select-pages > ul').removeClass('selected');
+    $('#select-page-' + category).addClass('selected');
+    // console.log('[selectSnbCategory] Selected list:');
+    // console.log($('#select-pages > ul.selected'));
+
+    $('#select-category > a').text($('#snb-category-' + category + ' > a').text());
+    $('#select-pages > a').text('선택');
+
+    closeSnbCategory();
+    openSnbPages();
+  }
+
+  function selectSnbPage (text, url) {
+    $('#select-pages > a').text(text);
+
+    location.href = '/' + url;
+  }
+
+  var BREADCRUMBS_CATEGORY_CODE = 'vessel';
+  var BREADCRUMBS_PAGE_TITLE = '선석배정 차트';
+  var pageCode = 'vessel.berthScheduleG';
+  $(function () {
+    if (pageCode !== '' && pageCode.indexOf('.') > 0) {
+      $('.t-menu.' + pageCode.split('.')[0]).addClass('active');
+      $('.s-menu.' + pageCode.split('.')[0]).addClass('active');
+      $('.' + pageCode.split('.')[1], '.s-menu.' + pageCode.split('.')[0]).addClass('active');
+    }
+    // Initialize snb tabindex.
+    $('.snb > ul > li > ul > li > a').attr('tabindex', -1);
+
+    // Initialize snb heights.
+    initializeSnbCategory();
+    initializeSnbPages();
+
+    // Initialize snb.
+    selectSnbCategory(BREADCRUMBS_CATEGORY_CODE);
+    closeSnbPages();
+    $('#select-pages > a').text(BREADCRUMBS_PAGE_TITLE);
+
+    // Close snb when all menu opened.
+    $('#button-open-all-menu').on('click', function () {
+      closeSnbCategory();
+      closeSnbPages();
+    });
+  })
+</script>
+<script>
+
+  /* $(function(){
+    var snbMenus = [
+      {snbMenu: 'vessel',
+       url: 'vessel',
+       subMenuList : [
+                '선석배정 목록',
+                '선석배정 차트',
+                '선박 항차 조회'
+              ]
+            },
+      {snbMenu: 'yard',
+       url: 'yard',
+       subMenuList : [
+                '야드1',
+                '야드2',
+                '야드3'
+              ]
+            }
+
+      ];
+
+  for(var i = 0; i < snbMenus.length; i++) {
+    console.log(location.pathname);
+  console.log('snbMenus[' + i + ']', snbMenus[i]);
+      var url = location.pathname.split('/')[1];
+      console.log('url: ', url);
+    if(snbMenus[i].url == url ) {
+      alert('이 메뉴! : ' + url);
+      alert('메뉴 생성 : ' + snbMenus[i].subMenuList );
+    }
+
+  }
+  }); */
+
+  function openEservice1() {
+    var userType = '';
+
+    if ( (userType == 'SHP') || (userType == 'ADM') ) {
+      window.open("http://e-service.pctc21.com/webip/html5/index.html", "_blank");
+      /*var form = document.linkForm;
+
+      var screenPath = 'findcontainer';
+
+      form.setAttribute("charset", "UTF-8");
+      form.setAttribute("method", "Post"); // Get 또는 Post 입력
+      form.setAttribute("action", "http://e-service.pctc21.com/webip/rest/policy/ssologin");
+
+      form.screenPath.value = screenPath;
+
+      if(screenPath != ""){
+
+        form.callType.value = 'biz';
+        form.target = "gwctApp";
+      } else{
+
+        form.callType.value = 'main';
+        form.target = "gwctNewWin";
+      }
+
+      form.target = "_blank";
+
+      //alert(form.screenPath.value);
+
+      form.submit();*/
+    } else {
+
+      alert('해당 기능은 선사만 사용 가능합니다.');
+      window.history.go(0);
+
+    }
+
+
+  }
+
+</script>
+</aside>
+
+<!-- sitemap modal -->
+<div id="sitemap">
+	<div class="content">
+		<h1>한진평택컨테이너터미널 전체메뉴</h1>
+		<div class="btn-close">x</div>
+		<div class="menu-list">
+			<div class="menu">
+				<h2>회사소개</h2>
+				<ul>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/overview');">CEO 인사말</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/ideology');">회사비전(경영이념)</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/history');">연혁</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/organization');">조직도</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/location');">찾아오시는 길</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/ci');">CI & SLOGAN</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/customer');">주요고객선사</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/intro/recruit');">채용정보</a></li>
+				</ul>
+			</div>
+			<div class="menu">
+				<h2>터미널 특징</h2>
+				<ul>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/terminal/feature');">터미널 특징</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/terminal/special');">특화시스템</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/terminal/facility');">시설현황</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/terminal/equipment');">장비현황</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/terminal/portLocation');">항만위치도</a></li>
+				</ul>
+			</div>
+			<div class="menu">
+				<h2>홍보센터</h2>
+				<ul>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/promote/prVideo');">홍보센터</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/promote/gallery');">포토갤러리</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/promote/brochure');">ONLINE BROCHURE</a></li>
+				</ul>
+			</div>
+			<div class="menu">
+				<h2>고객마당</h2>
+				<ul>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/board/notice');">공지사항</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/board/voice');">고객의 소리</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/board/data');">자료실</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/board/relation');">관련 사이트</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/board/contact');">담당자 연락처</a></li>
+					<li><a href="javascript:void(0)" onclick="lnbAction($(this), '/board/welfare');">복리후생</a></li>
+				</ul>
+			</div>
+			<div class="menu">
+				<h2><a href="javascript:void(0)">정보조회서비스</a></h2>
+			</div>
+		</div>
+	</div>
+	<div class="modal_layer"></div>
+</div>
+
+<div id="body" class="vessel-vesselChart">
+	
+
+
+
+<div id="page-title" class="container">
+    <nav id="breadcrumbs">
+        <ul>
+            <li class="breadcrumbs-home">
+                <a href="/">
+                    <img alt="HOME"
+                         src="/resources/images/ic_home.png"/>
+                </a>
+            </li>
+            <li>
+                <a href="/vessel">
+                    본선작업
+                </a>
+            </li>
+            <li>
+                <span>
+                    선석배정 차트
+                </span>
+            </li>
+        </ul>
+    </nav>
+
+    <h1 class="page-title">
+        선석배정 차트
+    </h1>
+
+    
+    
+        <p class="page-context">
+            
+        </p>
+    
+</div>
+	
+
+
+
+<section class="vesselChart">
+	<article class="container" style="width: 1200px !important;">
+		<form id="frmSearch" method="post" action="/esvc/vessel/berthScheduleG">
+			<div class="search-area">
+				<div class="area first">
+					<div>
+						<div class="label">조회일자</div>
+						<select id="selSearchYear" class="type4 ml selDate">
+						</select>
+						<select id="selSearchMonth" class="type4 selDate">
+						</select>
+						<select id="selSearchDate" class="type4 selDate">
+						</select>
+						<input type="hidden" id="hdnSearchDate" name="searchDate"/>
+					</div>
+					<div class="btn-list">
+						<button id="btnSearch" class="btn search">조회</button>
+					</div>
+				</div>
+			</div>
+		</form>
+
+		<div class="table-wrap">
+			<div class="state-wrap">
+				<div class="state-list">
+					<div class="box bg-blue7"></div>
+					<div>예정</div>
+					<div class="box bg-orange"></div>
+					<div>계획완료</div>
+					<div class="box bg-green"></div>
+					<div>완료</div>
+				</div>
+			</div>
+			<table class="common-table">
+				<caption class="blind">선석배정 차트</caption>
+				<thead>
+				<tr>
+				<tr>
+					<th>날짜</th>
+					
+					<th colspan="4">2026-08-05(수)</th>
+					
+					<th colspan="4">2026-08-06(목)</th>
+					
+					<th colspan="4">2026-08-07(금)</th>
+					
+					<th colspan="4">2026-08-08(토)</th>
+					
+					<th colspan="4">2026-08-09(일)</th>
+					
+					<th colspan="4">2026-08-10(월)</th>
+					
+					<th colspan="4">2026-08-11(화)</th>
+					
+				</tr>
+				<tr class="bg-blue6 time">
+					<td>시각</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+					<td style="width: 36px">0</td>
+					<td style="width: 36px">6</td>
+					<td style="width: 36px">12</td>
+					<td style="width: 36px">18</td>
+				</tr>
+				</thead>
+				<tbody>
+				<tr class="h-big B9" style="height: 160px">
+					<td class="bg-blue2">9B</td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+				</tr>
+				<tr class="h-big B8" style="height: 160px">
+					<td class="bg-blue2">8B</td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+				</tr>
+				<tr class="h-big B7" style="height: 187px">
+					<td class="bg-blue2">7B</td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+				</tr>
+				<tr class="h-big B6" style="height: 187px">
+					<td class="bg-blue2">6B</td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+					<td></td>
+				</tr>
+				</tbody>
+			</table>
+
+			
+				<div class="berth-chart done" data-voy-no="HDOT-0036-"
+						 style="left: 191px; top: 94px; height: 80px; width: 30px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>14</td>
+							<td>05</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">HDOT-0036-(P)</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart done" data-voy-no="STMJ-0007-"
+						 style="left: 191px; top: 254px; height: 96px; width: 60px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>20</td>
+							<td>09</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(2G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">STMJ-0007-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">365/355/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart done" data-voy-no="DJCT-0016-"
+						 style="left: 239px; top: 420px; height: 94px; width: 60px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>17</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(4G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">DJCT-0016-(S)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">195/180/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart done" data-voy-no="PCSG-0028-"
+						 style="left: 257px; top: 601px; height: 87px; width: 96px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>10</td>
+							<td>02</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(2G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">PCSG-0028-(S)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">273/347/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="HDOT-0037-"
+						 style="left: 275px; top: 94px; height: 80px; width: 132px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>14</td>
+							<td>12</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">HDOT-0037-(P)</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart work" data-voy-no="PCSZ-0023-"
+						 style="left: 347px; top: 414px; height: 99px; width: 90px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>01</td>
+							<td>17</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(2G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">PCSZ-0023-(S)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">600/83/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart work" data-voy-no="SWSP-0007-"
+						 style="left: 383px; top: 246px; height: 115px; width: 132px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>06</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(3G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">SWSP-0007-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">371/407/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="HDOB-0352-"
+						 style="left: 419px; top: 94px; height: 54px; width: 6px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>13</td>
+							<td>14</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">HDOB-0352-(P)</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="HDOB-0353-"
+						 style="left: 425px; top: 94px; height: 54px; width: 18px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>15</td>
+							<td>17</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">HDOB-0353-(P)</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart work" data-voy-no="NSFR-0016-"
+						 style="left: 599px; top: 414px; height: 94px; width: 60px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>19</td>
+							<td>06</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(2G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">NSFR-0016-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">219/200/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="NGTR-0046-"
+						 style="left: 671px; top: 601px; height: 97px; width: 90px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>23</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">NGTR-0046-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">300/300/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="SWDN-0009-"
+						 style="left: 671px; top: 414px; height: 115px; width: 54px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>17</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">SWDN-0009-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">395/0/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="XTPG-0029-"
+						 style="left: 671px; top: 254px; height: 78px; width: 42px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>15</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">XTPG-0029-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">100/200/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="HAYN-0001-"
+						 style="left: 743px; top: 414px; height: 94px; width: 96px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>19</td>
+							<td>12</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(2G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">HAYN-0001-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">400/200/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="PCSG-0029-"
+						 style="left: 743px; top: 254px; height: 87px; width: 96px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>19</td>
+							<td>12</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">PCSG-0029-(S)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">300/300/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="KBTR-0001-"
+						 style="left: 779px; top: 601px; height: 99px; width: 72px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>01</td>
+							<td>14</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">KBTR-0001-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">200/200/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="DJCF-0010-"
+						 style="left: 959px; top: 585px; height: 115px; width: 90px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>23</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">DJCF-0010-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">300/300/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="PCSZ-0024-"
+						 style="left: 1103px; top: 601px; height: 99px; width: 97px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>03</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">PCSZ-0024-(S)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">500/200/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="STSE-0016-"
+						 style="left: 1103px; top: 414px; height: 94px; width: 97px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>04</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">STSE-0016-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">400/400/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="XINP-0013-"
+						 style="left: 1103px; top: 254px; height: 78px; width: 90px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>08</td>
+							<td>23</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(0G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">XINP-0013-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">200/200/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-chart plan" data-voy-no="SWBT-0001-"
+						 style="left: 1169px; top: 585px; height: 115px; width: 31px">
+					<table class="chart-table">
+						<tbody>
+						<tr>
+							<td>19</td>
+							<td>06</td>
+						</tr>
+						
+						<tr>
+							<td style="text-align: left">(2G)</td>
+							<td></td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">SWBT-0001-(P)</td>
+						</tr>
+						
+						<tr>
+							<td colspan="2">0/300/0</td>
+						</tr>
+						
+						</tbody>
+					</table>
+				</div>
+			
+
+			
+				<div class="berth-schedule box-on hide HDOT-0036-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">Hyundai Oil Terminal TANKER</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDT</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDOT-0036-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">000</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-04 14:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-05 05:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0/0/0/0</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">1-7/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">선명 : 대산호 , LOA : 91.73</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide STMJ-0007-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SITC MOJI</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PTK</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">STMJ-0007-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2643E-2644W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SIT</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-04 20:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-05 09:59</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">365/355/0/720</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">13-20/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNSHD-CNLYG-CNTAO-JPNGO-JPOSA-JPTYO-JPYOK-KRINC-KRPTK-CNRZH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+							<tr>
+								<td style="width: 60px">DWS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">17</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">15</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">EAS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">9</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">8</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SIT</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">166</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">183</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SKR</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">156</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">135</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">TJM</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">12</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">8</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">WDF</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">5</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">6</td>
+							</tr>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide DJCT-0016-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">DONGJIN CONTINENTAL</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">IHP</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">DJCT-0016-(S)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0221E-0222W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">DJS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-05 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-05 17:06</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">195/180/0/375</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">25-32/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNSHK-VNSGN-KRDAE-CNYIT-HKHKG-KRPTK-KRINC-KRPUS-KRUSN-RYPVY-VNHPH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">우현접안</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+							<tr>
+								<td style="width: 60px">DJS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">69</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">21</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">DYS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">4</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">4</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">HAS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">32</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">42</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">HSL</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">5</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">6</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SKR</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">85</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">107</td>
+							</tr>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide PCSG-0028-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PACIFIC SINGAPORE</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PQS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PCSG-0028-(S)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2640E-2641W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-05 09:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-06 02:47</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">273/347/0/620</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">39-45/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNCWN-KRPTK-KRTSN-THBKK-THLCH-CNDLC-CNSHA-CNTAO-CNWEI-HKHKG-KRDAE-KRKAN-KRKUV</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+							<tr>
+								<td style="width: 60px">DWS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">17</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">13</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">EAS</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">9</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">6</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SIT</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">58</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">53</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SKR</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">175</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">259</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">TJM</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">9</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">10</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">WDF</td>
+								<td class="dis-o" style="width: 60px">0</td>
+								<td class="dis-c" style="width: 60px">5</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">6</td>
+							</tr>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide HDOT-0037-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">Hyundai Oil Terminal TANKER</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDT</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDOT-0037-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">000</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-05 14:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0/0/0/0</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">1-7/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">선명 : DL DIAMOND / LOA : 113.10</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide PCSZ-0023-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PACIFIC SHENZHEN</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PSS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PCSZ-0023-(S)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2623E-2625W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-06 01:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">600/83/0/683</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">25-32/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNDLC-KRPTK-KRPUS-KRTSN-KRUSN-USCVR-CNNGB-KRINC-CNSHA-CNTAG-CNTAO-CNTSN-CNWEI-KRDAE-KRKAN-KRKUV</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">지연 누적으로 2624W/E SKIP (항차 정상화)
+평택-인천-상해 기항</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+							<tr>
+								<td style="width: 60px">EAS</td>
+								<td class="dis-o" style="width: 60px">27</td>
+								<td class="dis-c" style="width: 60px">7</td>
+								<td class="load-o" style="width: 60px">36</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SKR</td>
+								<td class="dis-o" style="width: 60px">373</td>
+								<td class="dis-c" style="width: 60px">193</td>
+								<td class="load-o" style="width: 60px">47</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide SWSP-0007-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SAWASDEE SPICA</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">BTS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SWSP-0007-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2606N-2606N</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-06 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">371/407/0/778</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">12-21/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRINC-CNSHA-KRPTK-KRPUS-THBKK-THLCH-VNSGN-VNHPH-KRKAN-CNTAO</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">BTS 페이즈 아웃 (재투입 예정), 선적 진행예정
+평택-광양-부산 순으로 기항</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+							<tr>
+								<td style="width: 60px">HAS</td>
+								<td class="dis-o" style="width: 60px">137</td>
+								<td class="dis-c" style="width: 60px">0</td>
+								<td class="load-o" style="width: 60px">349</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">SKR</td>
+								<td class="dis-o" style="width: 60px">234</td>
+								<td class="dis-c" style="width: 60px">0</td>
+								<td class="load-o" style="width: 60px">58</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide HDOB-0352-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">Hyundai Oil Terminal Barge</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDB</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDOB-0352-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">000</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-06 13:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0/0/0/0</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">1-5/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">선명 : 15선영호 / LOA : 58.01</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide HDOB-0353-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">Hyundai Oil Terminal Barge</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDB</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HDOB-0353-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">000</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-06 15:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0/0/0/0</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">1-5/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">선명 : 가연호 / LOA : 52.20</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide NSFR-0016-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">STAR FRONTIER</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">IHS1</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NSFR-0016-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2615N-2616S</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NSL</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-07 19:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">219/200/0/419</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">25-32/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNSHK-CNXMN-HKHKG-KRPTK-KRINC-VNHPH-KRPUS-KRUSN</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">평택~인천</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+							<tr>
+								<td style="width: 60px">DYS</td>
+								<td class="dis-o" style="width: 60px">14</td>
+								<td class="dis-c" style="width: 60px">0</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">KMD</td>
+								<td class="dis-o" style="width: 60px">115</td>
+								<td class="dis-c" style="width: 60px">0</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+							<tr>
+								<td style="width: 60px">NSL</td>
+								<td class="dis-o" style="width: 60px">90</td>
+								<td class="dis-c" style="width: 60px">0</td>
+								<td class="load-o" style="width: 60px">0</td>
+								<td class="load-c" style="width: 60px">0</td>
+							</tr>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide NGTR-0046-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NAGOYA TRADER</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PXS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NGTR-0046-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2645E-2646W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-08 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">300/300/0/600</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">39-46/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNDLC-KRUSN-THBKK-CNSHA-CNTSN-CNWEI-KRINC-KRKAN-KRKUV-KRPTK-KRPUS</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide SWDN-0009-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SAWASDEE DENEB</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NTX</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SWDN-0009-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2608N-2608N</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-08 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">395/0/0/395</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">25-33/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRINC-KRKAN-KRPTK-KRPUS-THBKK-THLCH-VNSGN-VNHPH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">도크입고로 P/O, 양하만 진행</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide XTPG-0029-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">XIN TAI PING</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">TIS2</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">XTPG-0029-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">535E-535W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SIF</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-08 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">100/200/0/300</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">13-18/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRINC-KRPTK-CNNTG-CNTAG-CNTAO-CNTAC</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide HAYN-0001-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HEUNG-A YOUNG</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">ADHC</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HAYN-0001-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">9001E-2613S</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HAS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-08 19:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">400/200/0/600</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">25-32/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRPUS-KRUSN-KRKAN-VNHPH-THLCH-THBKK-KRINC</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">양하 PSS, 선적 IHP2 (1항차 임시기항)</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide PCSG-0029-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PACIFIC SINGAPORE</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PQS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PCSG-0029-(S)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2641E-2642W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-08 19:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">300/300/0/600</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">13-19/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNCWN-KRPTK-KRTSN-THBKK-THLCH-CNDLC-CNSHA-CNTAO-CNWEI-HKHKG-KRDAE-KRKAN-KRKUV</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide KBTR-0001-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KOBE TRADER</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">IHP</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KBTR-0001-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2605W-2605W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-09 01:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">200/200/0/400</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">39-46/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNSHK-VNSGN-KRDAE-CNYIT-HKHKG-KRPTK-KRINC-KRPUS-KRUSN-RYPVY-VNHPH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">YKTD 대체모선, 양하여부 재확인 필요</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide DJCF-0010-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">DONGJIN CONFIDENT</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NTX</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">DJCF-0010-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0149N-0150S</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">DJS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-10 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">300/300/0/600</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">37-46/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRINC-KRKAN-KRPTK-KRPUS-THBKK-THLCH-VNSGN-VNHPH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide PCSZ-0024-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PACIFIC SHENZHEN</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PSS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PCSZ-0024-(S)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2625E-2626W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-11 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">500/200/0/700</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">39-46/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNDLC-KRPTK-KRPUS-KRTSN-KRUSN-USCVR-CNNGB-KRINC-CNSHA-CNTAG-CNTAO-CNTSN-CNWEI-KRDAE-KRKAN-KRKUV</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide STSE-0016-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SITC SENDAI</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">PTK</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">STSE-0016-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2661E-2662W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SIT</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-11 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">400/400/0/800</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">25-32/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">CNSHD-CNLYG-CNTAO-JPNGO-JPOSA-JPTYO-JPYOK-KRINC-KRPTK-CNRZH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide XINP-0013-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">XING PING</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">JWKP</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">XINP-0013-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2629E-2629W</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">HHS</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-11 08:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">200/200/0/400</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">13-18/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRPTK-CNJIN-CNWFG-CNWEF-CNHHA</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+				<div class="berth-schedule box-on hide SWBT-0001-" style="font-size: 0">
+					<table class="common-table" style="display: inline-table; width: 55%; vertical-align:top; font-size: 14px">
+						<tbody>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선박명</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SAWASDEE BALTIC</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">항로</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">NTX</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">모선항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SWBT-0001-(P)</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">선사항차</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">-2614S</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">운항선사</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">SKR</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">반입마감시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">접안(예정)시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">2026-08-11 19:00</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">출항 시간</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal"></td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">양하/적하/이적/합계</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">0/300/0/300</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">From-To비트/선교</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">37-46/-</td>
+						</tr>
+						<tr>
+							<td style="width: 130px" class="bg-skyblue">Port Rotation</td>
+							<td style="width: 250px; word-break: break-word; white-space: normal">KRINC-KRKAN-KRPTK-KRPUS-THBKK-THLCH-VNSGN-VNHPH</td>
+						</tr>
+						<tr>
+							<td colspan="2" style="width: 250px; word-break: break-word; white-space: normal">NTX P/I (SWDN 대체모선), 선적만 진행</td>
+						</tr>
+						</tbody>
+					</table>
+
+					<table class="common-table qty-table" style="display: inline-table; width: 45%; vertical-align:top; font-size: 14px">
+						<thead>
+							<tr>
+								<td rowspan="2" style="width: 60px" class="bg-skyblue">Oper</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">양하</td>
+								<td colspan="2" style="width: 120px" class="bg-skyblue">적하</td>
+							</tr>
+							<tr>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+								<td style="width: 60px" class="bg-skyblue">잔여</td>
+								<td style="width: 60px" class="bg-skyblue">완료</td>
+							</tr>
+						</thead>
+						<tbody>
+						
+
+						</tbody>
+					</table>
+				</div>
+			
+
+		</div>
+
+	</article>
+</section>
+
+<script type="text/javascript">
+	$(function () {
+		setInitDate('2026-08-06');
+
+
+		
+			setQtyTotal('HDOT-0036-');
+		
+			setQtyTotal('STMJ-0007-');
+		
+			setQtyTotal('DJCT-0016-');
+		
+			setQtyTotal('PCSG-0028-');
+		
+			setQtyTotal('HDOT-0037-');
+		
+			setQtyTotal('PCSZ-0023-');
+		
+			setQtyTotal('SWSP-0007-');
+		
+			setQtyTotal('HDOB-0352-');
+		
+			setQtyTotal('HDOB-0353-');
+		
+			setQtyTotal('NSFR-0016-');
+		
+			setQtyTotal('NGTR-0046-');
+		
+			setQtyTotal('SWDN-0009-');
+		
+			setQtyTotal('XTPG-0029-');
+		
+			setQtyTotal('HAYN-0001-');
+		
+			setQtyTotal('PCSG-0029-');
+		
+			setQtyTotal('KBTR-0001-');
+		
+			setQtyTotal('DJCF-0010-');
+		
+			setQtyTotal('PCSZ-0024-');
+		
+			setQtyTotal('STSE-0016-');
+		
+			setQtyTotal('XINP-0013-');
+		
+			setQtyTotal('SWBT-0001-');
+		
+
+		$('#btnSearch').on('click', search);
+
+		$('.berth-chart').on('mouseover', function () {
+			$('.berth-schedule').addClass('hide');
+			var left = $(this).position().left + $(this).width() + 10;
+			if ((left + 413) >= $('article.container').width())
+				left = left - 413 - $(this).width() - 10;
+			$('.berth-schedule.' + $(this).data('voyNo')).css({
+				top: $(this).position().top,
+				left: left
+			}).removeClass('hide');
+		});
+
+		$('.berth-chart').on('mouseout', function () {
+			$('.berth-schedule').addClass('hide');
+		});
+
+		$('#selSearchMonth').on('change', function () {
+			var curDate = $('#selSearchDate').val();
+			setDateCombo($('#selSearchYear').val(), $('#selSearchMonth').val(), curDate);
+		});
+
+		$('#frmSearch').on('submit', onSubmit);
+	});
+
+	function setQtyTotal(className) {
+			let totalDisC = 0;
+			let totalDIsO = 0;
+			let totalLoadC = 0;
+			let totalLoadO = 0;
+
+			let $tr = $('.' + className + ' .qty-table tbody tr');
+			for(let i = 0; i < $tr.length; i++) {
+				totalDisC += Number($($tr[i]).find('td.dis-c').text());
+				totalDIsO += Number($($tr[i]).find('td.dis-o').text());
+				totalLoadC += Number($($tr[i]).find('td.load-c').text());
+				totalLoadO += Number($($tr[i]).find('td.load-o').text());
+			}
+
+			let $tbody = $('.' + className + ' .qty-table tbody');
+			$tbody.append('<tr>' +
+					'<td style="width: 60px">합계</td>\n' +
+					'<td class="totalDIsO" style="width: 60px"></td>' +
+					'<td class="totalDisC" style="width: 60px"></td>' +
+					'<td class="totalLoadO" style="width: 60px"></td>' +
+					'<td class="totalLoadC" style="width: 60px"></td>' +
+					'</tr>');
+			$('.' + className + ' .totalDIsO').text(totalDIsO);
+			$('.' + className + ' .totalDisC').text(totalDisC);
+			$('.' + className + ' .totalLoadO').text(totalLoadO);
+			$('.' + className + ' .totalLoadC').text(totalLoadC);
+
+
+	}
+
+	function search() {
+		$('#frmSearch').submit();
+	}
+
+	function onSubmit() {
+		$('#hdnSearchDate').val($('#selSearchYear').val() + '-' + $('#selSearchMonth').val() + '-' + $('#selSearchDate').val());
+	}
+
+	function setYearCombo(startYear) {
+		var year = (new Date()).getFullYear();
+
+		$('#selSearchYear').append('<option value="' + (year - 1) + '">' + (year - 1) + '년</option>');
+		$('#selSearchYear').append('<option value="' + (year) + '">' + (year) + '년</option>');
+		$('#selSearchYear').append('<option value="' + (year + 1) + '">' + (year + 1) + '년</option>');
+		$('#selSearchYear').val(startYear);
+	}
+
+	function setMonthCombo(startMonth) {
+		for (var i = 0; i < 12; i++) {
+			if (i < 9)
+				$('#selSearchMonth').append('<option value="0' + (i + 1) + '">' + (i + 1) + '월</option>');
+			else
+				$('#selSearchMonth').append('<option value="' + (i + 1) + '">' + (i + 1) + '월</option>');
+		}
+
+		$('#selSearchMonth').val(startMonth);
+	}
+
+	function setDateCombo(year, month, date) {
+		var d = new Date(parseInt(year), parseInt(month), 0);
+
+		$('#selSearchDate').empty();
+		for (var i = 0; i < d.getDate(); i++) {
+			if (i < 9)
+				$('#selSearchDate').append('<option value="0' + (i + 1) + '">' + (i + 1) + '일</option>');
+			else
+				$('#selSearchDate').append('<option value="' + (i + 1) + '">' + (i + 1) + '일</option>');
+		}
+
+		if (parseInt(date) > d.getDate())
+			$('#selSearchDate').val(d.getDate() + '');
+		else
+			$('#selSearchDate').val(date);
+	}
+
+	function setInitDate(searchDate) {
+		var year, month, date;
+		if (!searchDate || searchDate === '') {
+			var now = new Date();
+			year = now.getFullYear();
+			month = twoDigitNumber(now.getMonth() + 1);
+			date = twoDigitNumber(now.getDate());
+		} else {
+			var splitDate = searchDate.split('-');
+			year = splitDate[0];
+			month = splitDate[1];
+			date = splitDate[2];
+		}
+
+		setYearCombo(year);
+		setMonthCombo(month);
+		setDateCombo(year, month, date);
+	}
+</script>
+</div>
+
+<footer id="footer">
+	
+
+
+
+<div class="container">
+    <h2>
+        <a href="/">
+            <img alt=""
+                 src="/resources/images/ic_f_logo.png"/>
+        </a>
+    </h2>
+
+    <address class="footer-contact">
+        <p class="footer-contact-contents-group">
+            <span class="footer-contact-contents">
+                경기도 평택시 포승읍 평택항만길 181-57
+            </span>
+        </p>        
+    </address>
+
+    <p class="copyright">
+        COPYRIGHT⒞ PCTC ALL RIGHTS RESERVED.
+    </p>
+</div>
+</footer>
+</body>
+</html>

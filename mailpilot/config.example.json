@@ -15,6 +15,10 @@
   "poll_minutes": 10,
   "_모항": "우리 항(모항)으로 볼 항구 코드 목록. EDI 의 POL/POD 가 여기 걸리면 우리 물량으로 센다.\n           기본값은 평택(PTK 계열). 다른 항이면 그 항의 표기 변종을 모두 적는다.",
   "home_port_aliases": ["PTK", "KRPTK", "KRPYT", "PYT", "KRPYOTM", "PYOTM", "KRPYO"],
+  "_선석배정": "터미널 공개 선석배정 조회로 항차(짝·일정·출항)를 맞춘다. 끄면 0.5-01 처럼 메일만 보고 등록한다.",
+  "berth_plan": true,
+  "_비관할항로": "우리가 검수하지 않는 항로(항로코드). 이 항로 선박은 항차 카드를 새로 만들지 않는다.",
+  "excluded_routes": ["PXS", "PQS", "JWKP"],
   "firebase": {
     "apiKey": "AIza...앱에 넣은 것과 같은 값",
     "authDomain": "your-project.firebaseapp.com",
