@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.5"
+VERSION = "MailPilot Uni 0.5-01"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -744,6 +744,16 @@ def save_attachment(root, subdirs, filename, data):
     return "saved", path
 
 
+def voyage_dirname(root, parts, voy):
+    """적재할 항차 폴더 이름 — 같은 항차인 기존 폴더가 있으면 **그 표기**를 쓴다(0.5-01).
+
+    parts 는 항차 폴더의 부모 경로 조각([코드] 또는 [_기타, 코드]).
+    선사가 같은 항차를 0535E / 535E 로 섞어 써도 폴더가 갈라지지 않는다.
+    """
+    base = os.path.join(root, *[safe_name(p) for p in parts])
+    return app_upload.canonical_voy_dirname(base, voy) or voy
+
+
 def unclassified_dirname(subject, when=None):
     """{날짜}_{제목요약} 폴더 이름."""
     when = when or datetime.now()
@@ -1350,6 +1360,14 @@ class Collector:
         result = migrate_to_master(root, self.cache, self.master,
                                    log_dir=self.log_dir, firebase=self.firebase)
         save_cache(self.cache, self.cache_path)
+        # 0.5-01 — 표기(0패딩)만 다른 같은 항차를 정본 표기 하나로 합친다. 실패해도 수집은 계속한다.
+        try:
+            result["voyageSpelling"] = app_upload.migrate_voyage_spelling(
+                root, self.cache, self.master, self.firebase,
+                lambda msg: log(msg, self.log_dir), state_path=self.upload_state_path)
+        except Exception as exc:
+            log("항차 표기 정규화 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc),
+                self.log_dir)
         return result
 
     # ── 한 사이클 ──
@@ -1514,15 +1532,23 @@ class Collector:
             for dis, load in fresh:
                 log("짝 확인: %s %s ↔ %s" % (target["code"], dis, load), self.log_dir)
             if tally_enabled(self.cache, target["code"]):
-                subdirs = [target["code"], target["voyage"]]
-                log("판독: %s → 선박 %s(%s) · 항차 %s [%s]"
-                    % (subject, target["vessel"], target["code"], target["voyage"],
-                       target["source"]), self.log_dir)
+                parts = [target["code"]]
             else:
                 # 검수 대상 체크가 꺼진 선박 — 버리지 않고 _기타 로 모은다(발견 기록은 그대로)
-                subdirs = [OTHER_DIR, target["code"], target["voyage"]]
+                parts = [OTHER_DIR, target["code"]]
+            # 0.5-01 — 같은 항차인 기존 폴더가 있으면 그 표기로 적재한다(0535E → 535E)
+            voy_dir = voyage_dirname(root, parts, target["voyage"])
+            subdirs = parts + [voy_dir]
+            if voy_dir != target["voyage"]:
+                log("항차 표기 정규화 — %s 은(는) 기존 항차 %s 로 적재합니다."
+                    % (target["voyage"], voy_dir), self.log_dir)
+            if tally_enabled(self.cache, target["code"]):
+                log("판독: %s → 선박 %s(%s) · 항차 %s [%s]"
+                    % (subject, target["vessel"], target["code"], voy_dir,
+                       target["source"]), self.log_dir)
+            else:
                 log("대상 아님 — _기타 적재: %s %s (%s)"
-                    % (target["code"], target["voyage"], subject), self.log_dir)
+                    % (target["code"], voy_dir, subject), self.log_dir)
         else:
             subdirs = [UNCLASSIFIED_DIR, unclassified_dirname(subject, when)]
             summary["unclassified"] += 1
@@ -1543,7 +1569,7 @@ class Collector:
                 log("저장: %s" % path, self.log_dir)
 
         if target["ok"]:
-            entry = {"code": target["code"], "name": target["vessel"], "voyage": target["voyage"]}
+            entry = {"code": target["code"], "name": target["vessel"], "voyage": voy_dir}
             if entry not in summary["vessels"]:
                 summary["vessels"].append(entry)
 

@@ -27,6 +27,8 @@
      fail-open·전량제외 PUT 생략·좌표 보존·다수결 override·지문 멱등·null 부재
  22) 실파일 종단 — 미니 메일박스로 사이클 한 판 → 검수앱 항차·EDI 가 실제로 채워지는지
  23) 하트비트 — 앱 health.js 가 읽는 모양(at 은 ms 숫자, cycleMin)
+ 24) 0.5-01 항차 표기 정규화 — 0패딩 흔들림(0535E/535E) 병합·정본 선정·중복 키 정리·멱등
+     (XTPG 실사례 그대로 · DJCT 0221E 무접촉 · R083W 접두 보호 · 검수 흔적 보류)
 """
 
 import datetime
@@ -356,7 +358,15 @@ def test_firebase_rest():
 # ────────────────────── 6) GUI 스모크(가짜 tkinter) ──────────────────────
 
 def _install_fake_tkinter():
-    """디스플레이·tkinter 없는 환경에서 GUI 코드를 생성만 검증하기 위한 대역 모듈."""
+    """GUI 코드를 '창 없이' 생성만 검증하기 위한 대역 모듈.
+
+    한 번만 깐다 — 두 번 깔면 gui.py 가 이미 붙들고 있는 모듈과 달라져서
+    시험이 messagebox 를 바꿔치기해도 gui 쪽에 먹지 않는다.
+    """
+    already = sys.modules.get("tkinter")
+    if getattr(already, "_mailpilot_fake", False):
+        return already
+
     class FakeVar:
         def __init__(self, master=None, value=""):
             self._v = value
@@ -436,6 +446,7 @@ def _install_fake_tkinter():
     messagebox.askyesno = lambda *a, **k: False       # 시험 중에 폴더를 건드리지 않는다(기본 '아니오')
 
     tk.ttk, tk.filedialog, tk.messagebox = ttk, filedialog, messagebox
+    tk._mailpilot_fake = True                         # 두 번 깔지 않기 위한 표식
     sys.modules["tkinter"] = tk
     sys.modules["tkinter.ttk"] = ttk
     sys.modules["tkinter.filedialog"] = filedialog
@@ -445,14 +456,9 @@ def _install_fake_tkinter():
 
 def test_gui_smoke():
     print("\n[6] GUI 스모크")
-    try:
-        import tkinter  # noqa: F401
-        real = True
-    except ImportError:
-        real = False
-    if not real:
-        _install_fake_tkinter()
-        print("    (이 환경에는 tkinter 가 없어 가짜 모듈로 생성만 검증합니다)")
+    # 시험은 언제나 가짜 tkinter 로 돈다 — 진짜 tkinter 가 있는 PC(윈도)에서 돌리면
+    # 확인창·파일 고르기 창이 진짜로 떠서 무인 실행이 그 자리에 멈춘다.
+    _install_fake_tkinter()
 
     tmp = tempfile.mkdtemp(prefix="mailpilot_gui_")
     cfg_path = os.path.join(tmp, "config.json")
@@ -1052,10 +1058,7 @@ class _StubCollector:
 
 def test_gui_tally():
     print("\n[12] GUI — 수집 조건 문구 · 선박 체크 토글")
-    try:
-        import tkinter  # noqa: F401
-    except ImportError:
-        _install_fake_tkinter()
+    _install_fake_tkinter()                            # 진짜 창을 띄우지 않는다(무인 실행 안전)
     tmp = tempfile.mkdtemp(prefix="mailpilot_gui_tally_")
     cfg_path = os.path.join(tmp, "config.json")
     cache_path = os.path.join(tmp, "vessels_cache.json")
@@ -1188,10 +1191,7 @@ def test_organize_empty_cleanup():
 
 def test_gui_lock_and_autostart():
     print("\n[14] GUI — 수집 중 [폴더 정리] 잠금 · --autostart 무인 시작")
-    try:
-        import tkinter  # noqa: F401
-    except ImportError:
-        _install_fake_tkinter()
+    _install_fake_tkinter()                            # 진짜 창을 띄우지 않는다(무인 실행 안전)
     tmp = tempfile.mkdtemp(prefix="mailpilot_auto_")
     cfg_path = os.path.join(tmp, "config.json")
     cache_path = os.path.join(tmp, "vessels_cache.json")
@@ -1528,10 +1528,7 @@ def test_migrate_master():
 
 def test_gui_master():
     print("\n[19] GUI — 정본/미확인 표시 · 정본 연결 · 항목 삭제 · 정본표 가져오기")
-    try:
-        import tkinter  # noqa: F401
-    except ImportError:
-        _install_fake_tkinter()
+    _install_fake_tkinter()                            # 진짜 창을 띄우지 않는다(무인 실행 안전)
     tmp = tempfile.mkdtemp(prefix="mailpilot_gui_master_")
     root = os.path.join(tmp, "MAILBOX")
     cfg_path = os.path.join(tmp, "config.json")
@@ -1897,8 +1894,29 @@ class FakeDB:
 
     def get(self, path, params=None):
         self.calls.append(("GET", self._p(path), None))
-        value = self.data.get(self._p(path))
+        key = self._p(path)
+        if params and str((params or {}).get("shallow")).lower() in ("true", "1"):
+            return self._shallow(key)
+        value = self.data.get(key)
         return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
+
+    def _shallow(self, key):
+        """?shallow=true — 자식 이름만. 평평한 경로 사전에서 한 단계 자식을 뽑아 낸다."""
+        kids, prefix = {}, key + "/"
+        for path, value in self.data.items():
+            if path == key and isinstance(value, dict):
+                for name in value:
+                    kids[name] = True
+            elif path.startswith(prefix):
+                kids[path[len(prefix):].split("/")[0]] = True
+        return kids or None
+
+    def delete(self, path):
+        key = self._p(path)
+        self.calls.append(("DELETE", key, None))
+        for gone in [p for p in list(self.data) if p == key or p.startswith(key + "/")]:
+            self.data.pop(gone, None)
+        return {"ok": True}
 
     def put(self, path, obj):
         self.calls.append(("PUT", self._p(path), obj))
@@ -2310,6 +2328,194 @@ def test_heartbeat_shape():
     check("Collector 가 수집 주기를 하트비트에 실어 준다", col.firebase.cycle_min == 13)
 
 
+# ────────────────────── 24) 0.5-01 항차 표기 정규화 — 0패딩 흔들림 ──────────────────────
+#   실사례: XTPG 가 선사 표기대로 0534E/0534W/0535E 와 534E/534W/535E 로 갈라져 카드가 6장 떴다.
+#   규칙: 같은 선박 + 같은 방향(E/N·W/S) + 숫자부 정수값 동일 = 같은 항차.
+#         표기(정본)는 '자료가 많은 폴더'가 정한다 — 전역 패딩 제거가 아니다(DJCT 0221E 보호).
+
+VS_MASTER = AU_MASTER + [{"code": "RZOR", "name": "RIZHAO ORIENT", "aliases": [], "ko": []}]
+
+
+def _auto_info(code, voy, **extra):
+    """수집기가 만든 모양의 info(라이브와 같은 필드)."""
+    info = {"vsl": code, "voy": voy, "mode": "discharge" if voy[-1] in "EN" else "loading",
+            "createdAt": 1785944829801, "createdBy": "자동등록(수집기)",
+            "autoRegistered": True, "autoStatus": "collecting"}
+    info.update(extra)
+    return info
+
+
+def test_voyage_spelling():
+    print("\n[24] 0.5-01 항차 표기 정규화 — 0패딩 흔들림을 한 항차로")
+    try:
+        import app_upload as au
+    except Exception as exc:
+        check("app_upload 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+
+    # (1) 같은 항차 판정 — 정수 비교 + 문자 접두 보호
+    check("판정 — 0패딩 차이만 다르면 같은 항차(0535E ≡ 535E)",
+          au.same_voyage("0535E", "535E") and au.same_voyage("0534W", "534W")
+          and au.same_voyage("00221E", "221E"))
+    check("판정 — 번호가 다르면 다른 항차", not au.same_voyage("0534E", "535E"))
+    check("판정 — 방향이 다르면 다른 항차", not au.same_voyage("0534E", "0534W"))
+    check("판정 — 문자 접두는 접두까지 같아야 한다(R083W ≠ 083W)",
+          not au.same_voyage("R083W", "083W") and au.same_voyage("R083W", "R83W")
+          and not au.same_voyage("R083W", "D083W"))
+    check("판정 — 항차로 못 읽는 표기는 글자 그대로 비교(넘겨짚지 않는다)",
+          au.same_voyage("ABC", "ABC") and not au.same_voyage("ABC", "ABCD"))
+    check("voy_ident — (접두, 정수, 방향)",
+          au.voy_ident("R083W") == ("R", 83, "loading")
+          and au.voy_ident("0534E") == ("", 534, "discharge")
+          and au.voy_ident("2607N") == ("", 2607, "discharge")
+          and au.voy_ident("2635") is None)
+
+    tmp = tempfile.mkdtemp(prefix="mailpilot_voy_")
+    try:
+        root = os.path.join(tmp, "MB")
+        dis = _syn_baplie("535E", [("AAAU1000001", "2200", "CNSHA", "KRPTK", "0100284"),
+                                   ("AAAU1000002", "2200", "CNNGB", "KRPTK", "0100286")])
+        load = _syn_baplie("534W", [("BBBU2000001", "2200", "KRPTK", "CNSHA", "0200284")])
+
+        # XTPG 실사례 — 파일 수까지 라이브 그대로(0534E 2 · 534E 3 · 0534W 7 · 534W 1 · 0535E 2 · 535E 6)
+        _mk(root, "XTPG/0534E/CDL XTPG V-0534E(DWIC).xlsx", "x")
+        _mk(root, "XTPG/0534E/CDL XTPG V-0534E(TCLC).xlsx", "x")
+        _mk(root, "XTPG/534E/XTPG-534E&534W PTK DEP.TALLY REPORT.pdf", "x")
+        _mk(root, "XTPG/534E/XTPG534WPTK.ASC", load)
+        _mk(root, "XTPG/534E/XTPG534WPTK.EDI", load)
+        for n in range(7):
+            _mk(root, "XTPG/0534W/CLL XTPG V-0534W_%d.xlsx" % n, "x")
+        _mk(root, "XTPG/534W/XTPG-534W LOAD EDI FILE.EDI", load)
+        _mk(root, "XTPG/0535E/XTPG0535E_CDL.xlsx", "x")
+        _mk(root, "XTPG/0535E/XTPG0535W CDL.xlsx", "x")
+        _mk(root, "XTPG/535E/PTK XTPG 535E.ASC", dis)
+        _mk(root, "XTPG/535E/PTK XTPG 535E.edi", dis)
+        for name in ("PTK CDL OF XTPG 535E.xlsx", "DISCHE PLAN.pdf",
+                     "OPR PLAN.pdf", "OPR SUMMARY.pdf"):
+            _mk(root, "XTPG/535E/%s" % name, "x")
+        # 검수 흔적이 있는 중복 키 — 지우지 않고 보고만 한다
+        _mk(root, "XTPG/536E/PTK XTPG 536E.edi", dis)
+        # DJCT — 0패딩이 정본. 중복이 없으니 무접촉(전역 패딩 제거 금지 회귀)
+        _mk(root, "DJCT/0221E/DJCT 0221E PTK.edi", dis)
+        # RZOR — 문자 접두가 다르면 합치지 않는다
+        _mk(root, "RZOR/R083W/a.edi", load)
+        _mk(root, "RZOR/083W/b.edi", load)
+
+        db = FakeDB({
+            "voyages/XTPG_0534E/info": _auto_info("XTPG", "0534E", voy_d="0534E"),
+            "voyages/XTPG_0534W/info": _auto_info("XTPG", "0534W", voy_l="0534W"),
+            "voyages/XTPG_0535E/info": _auto_info("XTPG", "0535E", voy_d="0535E"),
+            "voyages/XTPG_534E/info": _auto_info("XTPG", "534E", voy_d="534E", voy_l="534W"),
+            "voyages/XTPG_534E/loading/ediContainers": {
+                "OLDU1000001": {"cn": "OLDU1000001", "pol": "KRPTK", "bay": "70"}},
+            "voyages/XTPG_535E/info": _auto_info("XTPG", "535E", voy_d="535E"),
+            "voyages/XTPG_535E/discharge/ediContainers": {
+                "OLDU2000002": {"cn": "OLDU2000002", "pod": "KRPTK", "bay": "12"}},
+            "voyages/XTPG_536E/info": _auto_info("XTPG", "536E", voy_d="536E"),
+            "voyages/XTPG_0536E/info": _auto_info("XTPG", "0536E", voy_d="0536E"),
+            "voyages/XTPG_0536E/records": {"r1": {"cn": "ZZZU9999999", "by": "김성일"}},
+            "voyages/DJCT_0221E/info": _auto_info("DJCT", "0221E", voy_d="0221E"),
+        })
+        cache = {"names": {}, "codes": {}, "tally": {},
+                 "pairs": {"XTPG": {"534E": "534W", "534W": "534E"}}}
+        state = os.path.join(tmp, "u.json")
+        with open(state, "w", encoding="utf-8") as fh:
+            json.dump({"_v": au.STATE_V, "folders": {
+                "XTPG/534E": {"fp": "old", "key": "XTPG_534E", "at": 1},
+                "XTPG/0535E": {"fp": "old", "key": "XTPG_0535E", "at": 1},
+                "DJCT/0221E": {"fp": "keep", "key": "DJCT_0221E", "at": 1}}}, fh)
+
+        res = au.migrate_voyage_spelling(root, cache, VS_MASTER, db, _quiet, state_path=state)
+
+        # (2) 폴더 병합 — 정본은 '자료가 많은 쪽'
+        dirs = sorted(os.listdir(os.path.join(root, "XTPG")))
+        check("폴더 병합 — XTPG 는 정본 폴더 3개만 남는다(0534W 는 자료가 많아 정본)",
+              dirs == ["0534W", "534E", "535E", "536E"], "남은 폴더 %s" % dirs)
+        counts = {d: len(os.listdir(os.path.join(root, "XTPG", d))) for d in dirs}
+        check("폴더 병합 — 파일은 하나도 잃지 않는다(2+3=5 · 7+1=8 · 2+6=8)",
+              counts == {"0534W": 8, "534E": 5, "535E": 8, "536E": 1}, "파일 수 %s" % counts)
+        check("폴더 병합 — 정본 폴더가 EDI 를 승계한다",
+              os.path.exists(os.path.join(root, "XTPG", "0534W", "XTPG-534W LOAD EDI FILE.EDI")))
+        check("전역 패딩 제거 금지 — DJCT 0221E 는 손대지 않는다",
+              sorted(os.listdir(os.path.join(root, "DJCT"))) == ["0221E"])
+        check("문자 접두 — R083W 와 083W 는 다른 항차라 합치지 않는다",
+              sorted(os.listdir(os.path.join(root, "RZOR"))) == ["083W", "R083W"])
+
+        # (3) 서버 중복 키 정리
+        check("서버 — 중복 항차 키 3개를 정본으로 합치고 지웠다",
+              sorted(res["deleted"]) == ["XTPG_0534E", "XTPG_0534W", "XTPG_0535E"],
+              "삭제 %s" % sorted(res["deleted"]))
+        check("서버 — 검수 흔적(records)이 있는 중복 키는 지우지 않고 보고만 한다",
+              res["held"] == ["XTPG_0536E"] and "voyages/XTPG_0536E/records" in db.data,
+              "보류 %s" % res["held"])
+        left = sorted((db.get("voyages", params={"shallow": "true"}) or {}).keys())
+        check("서버 — 남은 항차 키 목록",
+              left == ["DJCT_0221E", "XTPG_0536E", "XTPG_534E", "XTPG_535E", "XTPG_536E"],
+              "남은 키 %s" % left)
+        check("서버 — 정본 키의 EDI·info 는 그대로다(덮어쓰지 않는다)",
+              (db.data.get("voyages/XTPG_534E/loading/ediContainers") or {}).keys()
+              == {"OLDU1000001"}
+              and (db.data.get("voyages/XTPG_535E/discharge/ediContainers") or {}).keys()
+              == {"OLDU2000002"}
+              and (db.data.get("voyages/XTPG_534E/info") or {}).get("voy_d") == "534E")
+
+        # (4) 지문 무효화 — 합친 선박만
+        left_state = au.load_state(state)["folders"]
+        check("지문 — 합친 선박(XTPG)만 무효화, 다른 선박은 그대로",
+              sorted(left_state) == ["DJCT/0221E"], "남은 지문 %s" % sorted(left_state))
+
+        # (5) 새 메일 적재 — 같은 항차면 기존 폴더로
+        check("적재 — V-0535E 메일은 기존 535E 폴더로 들어간다",
+              core.voyage_dirname(root, ["XTPG"], "0535E") == "535E")
+        check("적재 — 처음 보는 항차는 그 표기 그대로 새 폴더",
+              core.voyage_dirname(root, ["XTPG"], "0540E") == "0540E")
+
+        # (6) 짝 증거 — 표기가 달라도 이어진다
+        check("짝 — 534W 로 적힌 증거가 0534W 폴더에 이어진다",
+              au.paired_partner(cache, "XTPG", "0534W") == "534E"
+              and au.paired_partner(cache, "XTPG", "0534E") == "534W")
+        check("짝 — 표기만 다른 같은 짝은 '새 짝'으로 안 센다(로그 폭주 방지)",
+              au.collect_pairs("XTPG 0534E&0534W REPORT", "XTPG", cache) == [])
+
+        # (7) 키 결정 — 표기만 다른 기존 키를 재사용한다(새 키 금지)
+        index = au.voyage_index(db, _quiet)
+        check("키 — 0535E 자료는 기존 XTPG_535E 키로 간다",
+              au.resolve_key(db, "XTPG", "0535E", (), index)[0] == "XTPG_535E")
+        check("키 — 아예 새 항차는 새 키를 만든다",
+              au.resolve_key(db, "XTPG", "0540E", (), index)[0] == "XTPG_0540E")
+
+        # (8) 멱등 — 두 번째는 아무것도 하지 않는다
+        db.calls = []
+        res2 = au.migrate_voyage_spelling(root, cache, VS_MASTER, db, _quiet, state_path=state)
+        check("멱등 — 두 번째 마이그레이션은 병합 0 · 삭제 0 · 쓰기 0",
+              not res2["merged"] and not res2["deleted"] and res2["errors"] == 0
+              and not db.writes("PUT") and not db.writes("PATCH") and not db.writes("DELETE"),
+              "병합 %d · 삭제 %d · 쓰기 %d"
+              % (len(res2["merged"]), len(res2["deleted"]),
+                 len(db.writes("PUT")) + len(db.writes("DELETE"))))
+
+        # (9) 병합 뒤 사이클 — 한 묶음 = 한 키, 새 키를 만들지 않는다
+        res3 = au.run(root, cache, VS_MASTER, db, {}, _quiet, state_path=state)
+        xtpg = sorted(k for k in res3["registered"] if k.startswith("XTPG_"))
+        check("병합 뒤 사이클 — 534 는 한 묶음 한 키, 0패딩 키를 새로 만들지 않는다",
+              xtpg == ["XTPG_534E", "XTPG_535E", "XTPG_536E"], "올린 키 %s" % xtpg)
+        keys_now = sorted(k for k in (db.get("voyages", params={"shallow": "true"}) or {})
+                          if k.startswith("XTPG_"))
+        check("병합 뒤 사이클 — 0패딩 키가 되살아나지 않는다",
+              keys_now == ["XTPG_0536E", "XTPG_534E", "XTPG_535E", "XTPG_536E"],
+              "XTPG 키 %s" % keys_now)
+        check("병합 뒤 사이클 — 선적 EDI 가 정본 키 loading 에 올라간다",
+              "BBBU2000001" in (db.data.get("voyages/XTPG_534E/loading/ediContainers") or {}))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # (10) 서버·메일박스가 없어도 사이클을 죽이지 않는다
+    check("메일박스가 없으면 조용히 건너뛴다",
+          au.migrate_voyage_spelling("/nope", {}, VS_MASTER, FakeDB(), _quiet)["merged"] == [])
+    check("정본표가 없으면 아무것도 합치지 않는다",
+          au.migrate_voyage_spelling(tempfile.gettempdir(), {}, [], FakeDB(), _quiet)["merged"] == [])
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -2341,6 +2547,7 @@ def main():
     test_app_upload()
     test_app_upload_e2e()
     test_heartbeat_shape()
+    test_voyage_spelling()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)
