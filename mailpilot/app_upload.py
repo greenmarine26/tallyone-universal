@@ -27,7 +27,7 @@ import berth_schedule as bsch                       # 0.6 — 터미널 선석�
 import edi_parser as ep
 
 STATE_V = 1                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
-PARSER_TAG = "MailPilot Uni 0.6-02 (edi_parser)"
+PARSER_TAG = "MailPilot Uni 0.7 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
 # 홈포트(모항) 판정 — 검수앱 src/utils.js 의 PYEONGTAEK_CODES / PYEONGTAEK_SUFFIX 와 같은 기준.
@@ -557,23 +557,37 @@ def resolve_key(firebase, code, key_voy, other_voys=(), index=None):
     return "%s_%s" % (code, order[0] if order else key_voy), (order[0] if order else key_voy)
 
 
-def register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, plan_row=None):
+def register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, plan_row=None,
+                    source="mail", current=None):
     """info — 없으면 만들고, 있으면 **빈 voy_d/voy_l 만** 채운다. 다른 필드는 절대 손대지 않는다.
 
     0.6 — 배정표(plan_row)가 있으면 일정 칸을 함께 채운다. planDate·terminalStatus·berth·pier 는
     '지금의 진실'이라 기존 값이 있어도 갱신하고, 나머지(vslFull 등)는 빈칸일 때만 채운다.
+
+    0.7 — source 로 '누가 이 카드를 세우는가'를 가른다. 만드는 모양만 다르고 보강 규칙은 하나다.
+      'mail'     자료가 와서 만든다      → createdBy 자동등록 · autoStatus collecting
+                 이미 예정 카드가 서 있으면 그때 **expected → collecting** 으로 넘긴다.
+      'expected' 배정표만 보고 미리 세운다 → createdBy 예정등록 · autoStatus expected
+      'plan'     기존 카드 일정 보강 전용  → autoStatus 는 손대지 않는다
+    current 를 주면 info 를 다시 읽지 않는다(부르는 쪽이 이미 읽었을 때).
     """
     fresh, refresh = plan_info_fields(plan_row, log)
-    current = firebase.get("voyages/%s/info" % key)
+    if current is None:
+        current = firebase.get("voyages/%s/info" % key)
     if not isinstance(current, dict) or not current:
+        expected = source == "expected"
+        # 예정 카드는 배정표에 양하 항차가 있으면 양하로 세운다(현장 계약). 메일 경로는 종전대로
+        #   폴더 항차의 방향을 따른다 — 0.6 까지의 판정을 바꾸지 않는다.
+        mode = ("discharge" if (expected and voy_d)
+                else (voy_direction(key_voy) or "discharge"))
         info = {
             "vsl": code,
             "voy": key_voy,
-            "mode": voy_direction(key_voy) or "discharge",
+            "mode": mode,
             "createdAt": _now_ms(),
-            "createdBy": "자동등록(수집기)",
+            "createdBy": "예정등록(수집기)" if expected else "자동등록(수집기)",
             "autoRegistered": True,
-            "autoStatus": "collecting",
+            "autoStatus": "expected" if expected else "collecting",
         }
         if voy_d:
             info["voy_d"] = voy_d
@@ -582,16 +596,21 @@ def register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, plan_row=No
         info.update(fresh)
         info.update(refresh)
         if firebase.put("voyages/%s/info" % key, strip_nulls(info)) is None:
-            log("    ✗ 항차 등록 실패: %s — 다음 사이클에 다시 시도합니다." % key)
+            log("    ✗ 항차 %s 실패: %s — 다음 사이클에 다시 시도합니다."
+                % ("예정등록" if expected else "등록", key))
             return False
-        log("    + 항차 등록: %s (%s%s)"
-            % (key, info["mode"], " · 배정표" if (fresh or refresh) else ""))
+        log("    + 항차 %s: %s (%s%s)"
+            % ("예정등록" if expected else "등록", key, info["mode"],
+               " · 배정표" if (fresh or refresh) else ""))
         return True
     patch = {}
     if voy_d and not current.get("voy_d"):
         patch["voy_d"] = voy_d
     if voy_l and not current.get("voy_l"):
         patch["voy_l"] = voy_l
+    # 0.7 — 예정 카드에 실자료가 처음 닿는 순간(메일 경로)만 상태를 넘긴다. 다른 필드는 무접촉.
+    if source == "mail" and current.get("autoStatus") == "expected":
+        patch["autoStatus"] = "collecting"
     for field, value in fresh.items():                  # 기존 값 존중 — 빈칸만 채운다
         if not current.get(field):
             patch[field] = value
@@ -1137,6 +1156,178 @@ def promote_pairs(plan, cache, log):
     return count
 
 
+# ──────────────────────── ㉳ 예정등록(0.7) — 자료보다 먼저 카드를 세운다 ────────────────────────
+#
+# 현장 검수앱에는 자료가 오기 전에도 배정표·도선 기반 '예정 카드'가 미리 선다. 범용판은 0.6 까지
+# **메일 자료가 온 항차만** 등록해 그 카드가 없었다. 배정표는 이미 사이클마다 받고 있으므로
+# 그 줄로 카드를 세운다 — 만드는 것은 info 뿐이고 섹션(discharge/loading)은 자료가 올 때 생긴다.
+#
+#   대상 줄 : 정본표에 있는 선박 · 검수 대상(체크 켬) · 비관할 항로 아님 · DEP.TALLY 마감 아님 ·
+#             실적 출항(ATD) 없음  → 판정 잣대는 0.6 registration_gate 하나만 쓴다.
+#   키      : 0.5-01 resolve_key/voy_ident 재사용 — 이미 있는 키면 새로 만들지 않고 보강만 한다.
+#   상태    : autoStatus 'expected' → 실자료가 닿으면 'collecting'(register_voyage source='mail').
+#   철수    : 예정으로 세운 카드가 배정표에서 출항·비관할·마감으로 바뀌면 그 자리에서 치운다
+#             (검수 흔적·사람이 만든 카드는 remove_voyage_key 가 막는다).
+
+EXPECTED_STATUS = "expected"
+
+# 캐시 지문에 넣는 배정표 값 — 이 중 하나라도 바뀌어야 다시 쓴다(같은 PUT/PATCH 반복 금지).
+_EXPECTED_SIG_FIELDS = ("voy_d", "voy_l", "vessel_name", "atb", "etb", "atd", "etd",
+                        "status", "berth", "pier", "excluded", "departed")
+
+
+def expected_sig(row):
+    """배정표 줄에서 예정 카드에 실리는 값만 뽑은 지문."""
+    return "|".join(str((row or {}).get(field) or "") for field in _EXPECTED_SIG_FIELDS)
+
+
+def expected_row_id(row):
+    """캐시에서 이 배정표 줄을 가리키는 이름 — 짝 표기 그대로(터미널 모선항차는 매번 바뀐다)."""
+    return "%s/%s" % ((row or {}).get("voy_d") or "-", (row or {}).get("voy_l") or "-")
+
+
+def expected_table(cache):
+    return cache.setdefault("expected", {}) if cache is not None else {}
+
+
+def forget_expected(cache, key):
+    """이 항차 키를 가리키던 예정등록 기록을 지운다 — 카드가 사라졌으면 지문도 사라져야 한다."""
+    if cache is None or not key:
+        return 0
+    gone = 0
+    for code, rows in list((cache.get("expected") or {}).items()):
+        for row_id, seen in list((rows or {}).items()):
+            if (seen or {}).get("key") == key:
+                rows.pop(row_id, None)
+                gone += 1
+        if not rows:
+            cache["expected"].pop(code, None)
+    return gone
+
+
+def expected_rows(plan, cache, master, log=None):
+    """예정 카드를 세울 배정표 줄만 고른다 → [(줄, 항차들)]. 판정은 registration_gate 하나로."""
+    core = _core()
+    out = []
+    for row in (plan.rows if plan is not None else []):
+        code = str(row.get("vessel_code") or "").upper()
+        voys = [v for v in (row.get("voy_d"), row.get("voy_l")) if v]
+        if not code or not voys:
+            continue                                    # 선사항차를 못 읽은 줄(유조선 등)은 건너뛴다
+        if not core.master_by_code(master, code):
+            continue                                    # 정본표에 없는 배 — 이름을 모르는 카드는 안 세운다
+        if not core.tally_enabled(cache, code):
+            continue                                    # 검수 대상 체크를 끈 배
+        if row.get("atd"):
+            continue                                    # 실적 출항 시각이 찍힌 기항은 이미 끝났다
+        allowed, why = registration_gate(plan, cache, code, voys)
+        if not allowed:
+            if log:
+                log("  · 예정등록 제외: %s %s — %s" % (code, "/".join(voys), why))
+            continue
+        out.append((row, voys))
+    return out
+
+
+def retire_expected(firebase, cache, plan, log):
+    """배정표가 '끝났다'고 말하는 예정 카드를 그 자리에서 치운다 — 다음 기동을 기다리지 않는다.
+
+    자료가 닿아 collecting 이 된 카드는 손대지 않는다(기존 정리 규칙이 맡는다).
+    """
+    out = {"retired": [], "held": [], "errors": 0}
+    for code, rows in list(((cache.get("expected") if cache else None) or {}).items()):
+        for row_id, seen in list((rows or {}).items()):
+            key = (seen or {}).get("key")
+            if not key:
+                continue
+            voys = [v for v in str(row_id).split("/") if v and v != "-"]
+            if not voys or plan.find(code, voys) is None:
+                continue                                # 배정표 창 밖 — 기동 정리가 맡는다
+            allowed, why = registration_gate(plan, cache, code, voys)
+            if allowed:
+                continue
+            info = firebase.get("voyages/%s/info" % key)
+            if not isinstance(info, dict) or not info:
+                rows.pop(row_id, None)                  # 이미 없는 카드 — 지문만 정리한다
+                continue
+            if info.get("autoStatus") != EXPECTED_STATUS:
+                continue                                # 자료가 닿은 카드는 예정 카드가 아니다
+            state = remove_voyage_key(firebase, key, "예정 카드 철수 — %s" % why, log)
+            if state == "deleted":
+                out["retired"].append(key)
+                rows.pop(row_id, None)
+            elif state == "held":
+                out["held"].append(key)
+                rows.pop(row_id, None)                  # 사람이 맡은 카드는 다시 묻지 않는다
+            else:
+                out["errors"] += 1
+    return out
+
+
+def register_expected(plan, cache, master, firebase, cfg, log, index=None):
+    """배정표 수신 사이클마다 — 예정 카드를 세우고(없으면), 끝난 예정 카드를 치운다.
+
+    새 키가 없을 때만 info 를 PUT 한다. 이미 키가 있으면 0.6 보강 경로 그대로다(중복 로직 없음).
+    """
+    out = {"created": [], "filled": [], "retired": [], "held": [], "skipped": 0, "errors": 0}
+    if plan is None or firebase is None or not getattr(firebase, "enabled", False):
+        return out
+    if not (cfg or {}).get("expected_cards", True):
+        log("예정등록 — 설정에서 껐습니다(expected_cards).")
+        return out
+
+    try:
+        retired = retire_expected(firebase, cache, plan, log)
+    except Exception as exc:                            # 철수가 죽어도 등록은 계속한다
+        log("예정 카드 철수 중 오류: %s: %s" % (type(exc).__name__, exc))
+        retired = {"retired": [], "held": [], "errors": 1}
+    out["retired"] = retired["retired"]
+    out["held"] = retired["held"]
+    out["errors"] += retired["errors"]
+
+    rows = expected_rows(plan, cache, master, None)
+    if not rows:
+        log("예정등록 — 배정표에서 세울 예정 항차가 없습니다.")
+        return out
+    if index is None:
+        index = voyage_index(firebase, log)
+    table = expected_table(cache)
+    done = set()
+    for row, voys in rows:
+        code = str(row.get("vessel_code") or "").upper()
+        row_id, sig = expected_row_id(row), expected_sig(row)
+        seen = (table.get(code) or {}).get(row_id) or {}
+        if seen.get("sig") == sig:
+            out["skipped"] += 1
+            continue                                    # 바뀐 것이 없다 — 읽지도 쓰지도 않는다
+        voy_d, voy_l = row.get("voy_d") or "", row.get("voy_l") or ""
+        key, key_voy = resolve_key(firebase, code, voy_d or voy_l, voys, index)
+        if key in done:
+            continue                                    # 같은 카드를 가리키는 두 줄(터미널 중복)
+        done.add(key)
+        current = firebase.get("voyages/%s/info" % key)
+        is_new = not (isinstance(current, dict) and current)
+        if not register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, row,
+                               source="expected", current=current or {}):
+            out["errors"] += 1
+            continue
+        index.setdefault(code, {}).setdefault(str(key_voy).upper(), key)
+        (out["created"] if is_new else out["filled"]).append(key)
+        if cache is not None:
+            table.setdefault(code, {})[row_id] = {"sig": sig, "key": key, "at": _now_ms()}
+
+    if out["created"]:
+        log("예정등록 — 새 예정 카드 %d장: %s"
+            % (len(out["created"]), ", ".join(out["created"])))
+    if out["retired"]:
+        log("예정등록 — 끝난 예정 카드 %d장을 치웠습니다: %s"
+            % (len(out["retired"]), ", ".join(out["retired"])))
+    if not out["created"] and not out["retired"]:
+        log("예정등록 — 세울 새 카드가 없습니다(배정표 %d줄 대상 · 그대로 %d줄 · 보강 %d장)"
+            % (len(rows), out["skipped"], len(out["filled"])))
+    return out
+
+
 # ── 기존 키 정리 — 배정표를 받은 사이클에 한 번(멱등) ──
 
 def remove_voyage_key(firebase, key, why, log):
@@ -1155,6 +1346,20 @@ def remove_voyage_key(firebase, key, why, log):
         return "failed"
     log("  − 항차 카드 삭제: %s (%s · 폴더·파일은 그대로)" % (key, why))
     return "deleted"
+
+
+def stale_expected(firebase, key):
+    """배정표에서 사라진 '빈 예정 카드'인가 — autoStatus expected · 섹션 없음 · 검수 흔적 없음.
+
+    자료가 닿은 카드(collecting)·사람이 만든 카드는 여기서 False 다 — 지우는 것은
+    **아무 것도 담기지 않은 예정 카드**뿐이다. 실제 삭제는 remove_voyage_key 가 한 번 더 막는다.
+    """
+    children, traces, info = voyage_traces(firebase, key)
+    if traces or not info:
+        return False
+    if info.get("autoStatus") != EXPECTED_STATUS or not info.get("autoRegistered"):
+        return False
+    return not any(name in children for name in ("discharge", "loading"))
 
 
 def reconcile_with_plan(firebase, cache, plan, log):
@@ -1198,7 +1403,7 @@ def reconcile_with_plan(firebase, cache, plan, log):
                 out["held"].append(dup)
             else:
                 out["errors"] += 1
-        if register_voyage(firebase, canon, code, canon_voy, dis, load, log, row):
+        if register_voyage(firebase, canon, code, canon_voy, dis, load, log, row, source="plan"):
             out["filled"].append(canon)
         else:
             out["errors"] += 1
@@ -1220,6 +1425,9 @@ def reconcile_with_plan(firebase, cache, plan, log):
                                   % (row.get("atd") or row.get("etd") or "")))
             elif row is None and is_closed(cache, code, [voy]):
                 plan_gone.append((key, "기항 마감(DEP.TALLY) · 배정표 창 밖"))
+            elif row is None and stale_expected(firebase, key):
+                # 0.7 — 배정표 창 밖으로 밀린 **예정 카드**(자료도 흔적도 없는 빈 카드)는 치운다.
+                plan_gone.append((key, "배정표 창 밖 예정 카드(자료 없음)"))
     if not plan_gone:
         log("선석배정 정리 — 치울 지난 항차·비관할 카드가 없습니다.")
         return out
@@ -1229,8 +1437,10 @@ def reconcile_with_plan(firebase, cache, plan, log):
         state = remove_voyage_key(firebase, key, why, log)
         if state == "deleted":
             out["deleted"].append(key)
+            forget_expected(cache, key)                 # 0.7 — 지운 카드의 예정등록 지문도 지운다
         elif state == "held":
             out["held"].append(key)
+            forget_expected(cache, key)
         else:
             out["errors"] += 1
     return out
@@ -1257,10 +1467,11 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
     0.6 — 먼저 선석배정표를 한 번 읽는다. 받았으면 짝을 확정하고(필요하면 한 번 정리하고)
     배정표에 없거나 이미 나간 항차의 **새 카드 만들기**를 막는다. 못 받았으면 그 단계를
     통째로 건너뛰고 0.5-01 과 똑같이 돈다(자료를 잃지 않는 쪽).
+    0.7 — 배정표를 받았으면 그 줄로 **예정 카드**를 미리 세운다(자료가 오기 전에도 화면에 뜨게).
     """
     result = {"folders": 0, "voyages": 0, "changed": 0, "skipped": 0, "uploads": 0,
               "errors": 0, "registered": [], "pairs": 0, "blocked": [], "plan": 0,
-              "planReconciled": False}
+              "planReconciled": False, "expected": [], "retired": []}
     if firebase is None or not getattr(firebase, "enabled", False):
         log("파이어베이스 미설정 — 앱 채우기(항차·EDI 등록)를 건너뜁니다.")
         return result
@@ -1297,6 +1508,15 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
             except Exception as exc:                    # 정리가 죽어도 수집·업로드는 계속한다
                 log("선석배정 정리 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc))
                 result["errors"] += 1
+        # 0.7 — 자료가 오기 전에도 배정표 줄로 예정 카드를 세운다(사이클마다 · 멱등).
+        try:
+            expected = register_expected(plan, cache, master, firebase, cfg, log)
+            result["expected"] = expected["created"]
+            result["retired"] = expected["retired"]
+            result["errors"] += expected["errors"]
+        except Exception as exc:                        # 예정등록이 죽어도 수집·업로드는 계속한다
+            log("예정등록 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc))
+            result["errors"] += 1
 
     # 1차 — 짝 증거부터 모은다(키를 정하기 전에 다 알고 있어야 한 키로 묶인다).
     for code, voy, _path, names in folders:

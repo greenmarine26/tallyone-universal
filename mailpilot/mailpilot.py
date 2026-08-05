@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.6-02"
+VERSION = "MailPilot Uni 0.7"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -228,6 +228,8 @@ DEFAULT_CONFIG = {
     # 0.6 — 터미널 선석배정(공개 조회) 사용 여부와 비관할 항로(등록 제외, 검수사 확정)
     "berth_plan": True,
     "excluded_routes": ["PXS", "PQS", "JWKP"],
+    # 0.7 — 배정표 줄로 '예정 카드'를 미리 세울지. 끄면 0.6 처럼 자료가 온 항차만 등록한다.
+    "expected_cards": True,
     "firebase": {},
 }
 
@@ -1425,6 +1427,8 @@ class Collector:
         summary["appVoyages"] = list(result.get("registered") or [])
         summary["appUploads"] = result.get("uploads", 0)
         summary["appBlocked"] = list(result.get("blocked") or [])
+        summary["appExpected"] = list(result.get("expected") or [])   # 0.7 예정등록
+        summary["appRetired"] = list(result.get("retired") or [])
         summary["errors"] += result.get("errors", 0)
         return result
 

@@ -32,6 +32,9 @@
  25) 0.6 선석배정 게이트 — 두 터미널 실응답 픽스처 판독(짝·시각·상태·부두) · 요청 1회/터미널 ·
      등록 게이트(출항·비관할·DEP.TALLY·fail-open) · 배정표 짝 승격 · 갈라진 카드 병합 ·
      지난 항차 제거(검수 흔적 보류) · 배정표 못 받으면 무삭제 · 멱등
+ 26) 0.7 예정등록 — 배정표 줄로 카드를 미리 세운다: 세울 25장 정본 대조 · info PUT 계약 ·
+     기존 키 재사용(표기 흔들림) · 제외(비관할·마감·출항·정본표 없음·체크 끔·설정 끔) ·
+     expected→collecting 전이 · 출항 예정 카드 철수 · 창 밖 빈 예정 카드 제거 · 멱등(쓰기 0)
 """
 
 import datetime
@@ -2977,10 +2980,24 @@ def _berth_cycle(au, http):
         res = au.run(root, cache, master, db, cfg, lines.append, state_path=state_path,
                      opener=http, now_ms=BERTH_NOW)
         keys = sorted(k.split("/")[1] for k in db.data if k.endswith("/info"))
+        # 0.7 — 배정표에 실린 앞으로의 TNJP 기항은 자료가 없어도 예정 카드로 선다.
+        #   막아야 할 것(이미 나간 항차·비관할 항로)이 안 서는 것이 이 시험의 뼈대다.
         check("종단 — 이미 나간 항차·비관할 항로는 카드를 만들지 않는다",
-              keys == ["MCAP_631S", "TNJP_26358E"], str(keys))
+              "TNJP_26354E" not in keys and "NGTR_2645E" not in keys
+              and "MCAP_631S" in keys and "TNJP_26358E" in keys, str(keys))
         check("종단 — 막은 항차를 로그와 결과에 남긴다",
               set(res["blocked"]) == {"TNJP_26354E", "NGTR_2645E"}, str(res["blocked"]))
+        check("종단(0.7) — 자료가 없는 앞으로의 기항도 예정 카드로 선다(TNJP 26356E·26357E)",
+              {"TNJP_26356E", "TNJP_26357E"} <= set(keys)
+              and set(res["expected"]) >= {"TNJP_26356E", "TNJP_26357E"}, str(keys))
+        check("종단(0.7) — 자료가 닿은 예정 카드는 collecting 으로 넘어간다(TNJP 26358E)",
+              (db.data.get("voyages/TNJP_26358E/info") or {}).get("autoStatus") == "collecting"
+              and (db.data.get("voyages/TNJP_26356E/info") or {}).get("autoStatus") == "expected",
+              json.dumps(db.data.get("voyages/TNJP_26358E/info"), ensure_ascii=False))
+        check("종단(0.7) — 예정 카드에는 자료 노드(discharge/loading)를 만들지 않는다",
+              not [k for k in db.data if k.startswith("voyages/TNJP_26356E/")
+                   and not k.endswith("/info")],
+              str([k for k in db.data if k.startswith("voyages/TNJP_26356E/")]))
         check("종단 — 배정표에 없는 선박은 종전대로 올라간다(fail-open)",
               "voyages/MCAP_631S/loading/ediContainers" in db.data)
         check("종단 — 배정표가 새 카드에 일정을 실어 준다",
@@ -3010,6 +3027,266 @@ def _berth_cycle(au, http):
               au.fetch_plan({"berth_plan": False}, None)[0] is None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 26) 0.7 예정등록 — 자료보다 먼저 카드가 선다 ──────────────────────
+#   같은 실응답 픽스처(2026-08-06 07:00)를 쓴다. 배정표 줄만 보고 세우는 카드이므로
+#   '무엇이 서고 무엇이 안 서는가'가 곧 계약이다.
+
+EXPECTED_MASTER_CODES = ("OBWH", "RZOR", "TNJP", "HAYN", "KBTR", "NSDC", "ATPR", "DXQD",
+                         "TMPZ", "DJCF", "SWBT", "XTPG", "PCSZ", "SWSP", "NSFR", "SWDN",
+                         "NGTR", "PCSG", "MCAP", "STMJ", "DJCT")
+
+# 이 배정표(2026-08-06 07:00)에서 예정 카드가 서야 할 항차 — 손으로 대조한 정본.
+EXPECTED_KEYS = [
+    "ATPR_2636E", "ATPR_2637W", "DJCF_0149N", "DXQD_2631E", "HAYN_9001E", "KBTR_2605W",
+    "NSDC_2607N", "NSFR_2615N", "OBWH_2707E", "OBWH_2709E", "OBWH_2711E", "PCSZ_2623E",
+    "PCSZ_2625E", "RZOR_R084E", "RZOR_R085E", "RZOR_R086E", "SWBT_2614S", "SWDN_2608N",
+    "SWSP_2606N", "TMPZ_2025E", "TMPZ_2026E", "TNJP_26356E", "TNJP_26357E", "TNJP_26358E",
+    "XTPG_535E",
+]
+
+
+def _expected_master():
+    return [{"code": c, "name": c, "aliases": [], "ko": []} for c in EXPECTED_MASTER_CODES]
+
+
+def _plain_cache():
+    return {"names": {}, "codes": {}, "tally": {}, "pairs": {}}
+
+
+def _expected_info(code, voy, **extra):
+    """0.7 예정등록이 만든 모양의 info."""
+    info = {"vsl": code, "voy": voy, "mode": "discharge" if voy[-1] in "EN" else "loading",
+            "createdAt": 1785944829801, "createdBy": "예정등록(수집기)",
+            "autoRegistered": True, "autoStatus": "expected"}
+    info.update(extra)
+    return info
+
+
+def _departed_plan(au, rows, master_vvd, atd):
+    """한 줄만 '실적 출항'으로 바꾼 배정표 — 예정 카드 철수 시험용(원본은 안 건드린다)."""
+    copy = json.loads(json.dumps(rows, ensure_ascii=False))
+    for row in copy:
+        if row.get("master_vvd") == master_vvd:
+            row["atd"] = atd
+            row["status"] = "departed"
+            row["departed"] = True
+    return au.BerthPlan(copy)
+
+
+def test_expected_cards():
+    print("\n[26] 0.7 예정등록 — 배정표 줄로 카드를 미리 세운다")
+    try:
+        import app_upload as au
+        import berth_schedule as bs
+    except Exception as exc:
+        check("app_upload 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+    rows, why = bs.fetch_all(BERTH_CFG, None, opener=_berth_http(), now_ms=BERTH_NOW)
+    if rows is None:
+        check("예정등록 — 배정표 픽스처", False, str(why))
+        return
+    plan = au.BerthPlan(rows)
+    master = _expected_master()
+    cfg = dict(BERTH_CFG)
+
+    # (1) 빈 서버에 한 판 — 무엇이 서는가
+    db, cache, lines = FakeDB({}), _plain_cache(), []
+    out = au.register_expected(plan, cache, master, db, cfg, lines.append)
+    keys = sorted(k.split("/")[1] for k in db.data if k.endswith("/info"))
+    check("예정등록 — 배정표가 말하는 앞으로의 기항이 전부 카드로 선다(25장)",
+          keys == EXPECTED_KEYS and sorted(out["created"]) == EXPECTED_KEYS,
+          "%d장: %s" % (len(keys), ", ".join(keys)))
+    check("예정등록 — 검수사 화면의 예정 카드가 그대로 선다(OBWH 2707E·RZOR R084E·"
+          "TNJP 26356E·HAYN 9001E·KBTR 2605W)",
+          {"OBWH_2707E", "RZOR_R084E", "TNJP_26356E", "HAYN_9001E", "KBTR_2605W"} <= set(keys))
+    check("예정등록 — 세운 카드 목록을 로그 한 줄로 남긴다",
+          any("새 예정 카드" in l and "OBWH_2707E" in l for l in lines), "")
+
+    # (2) info 계약 — 현장 계약 그대로(PUT 한 번, 섹션은 안 만든다)
+    info = db.data.get("voyages/OBWH_2707E/info") or {}
+    check("예정 info — vsl·voy·mode·짝(voy_d/voy_l)",
+          info.get("vsl") == "OBWH" and info.get("voy") == "2707E"
+          and info.get("mode") == "discharge" and info.get("voy_d") == "2707E"
+          and info.get("voy_l") == "2708W", json.dumps(info, ensure_ascii=False))
+    check("예정 info — createdBy 예정등록(수집기) · autoRegistered · autoStatus expected",
+          info.get("createdBy") == "예정등록(수집기)" and info.get("autoRegistered") is True
+          and info.get("autoStatus") == "expected", json.dumps(info, ensure_ascii=False))
+    check("예정 info — createdAt 은 밀리초 숫자",
+          isinstance(info.get("createdAt"), int) and info["createdAt"] > 1_600_000_000_000,
+          str(info.get("createdAt")))
+    check("예정 info — 배정표 일정·부두·선석·상태·실명이 함께 실린다",
+          info.get("planDate") == "2026-08-07 10:00 ~ 2026-08-07 19:00"
+          and info.get("planSrc") == "plan" and info.get("terminalStatus") == "planned"
+          and info.get("pier") == "PNCT" and info.get("berth") == "2번선석"
+          and info.get("vslFull") == "OCEAN BLUE WHALE", json.dumps(info, ensure_ascii=False))
+    check("예정 info — 만드는 것은 info 하나(PUT 1회 · 섹션은 자료가 올 때)",
+          [c for c in db.calls if c[0] == "PUT" and "OBWH_2707E" in c[1]]
+          == [("PUT", "voyages/OBWH_2707E/info", info)]
+          and not [k for k in db.data if k.startswith("voyages/OBWH_2707E/")
+                   and not k.endswith("/info")],
+          str([k for k in db.data if k.startswith("voyages/OBWH_2707E/")]))
+    check("예정등록 — 양하 항차가 없으면 선적 카드로 선다(KBTR 2605W · ATPR 2637W)",
+          (db.data.get("voyages/KBTR_2605W/info") or {}).get("mode") == "loading"
+          and (db.data.get("voyages/ATPR_2637W/info") or {}).get("mode") == "loading"
+          and "voy_d" not in (db.data.get("voyages/KBTR_2605W/info") or {}))
+    check("예정등록 — null 을 보내지 않는다",
+          not _nulls([c[2] for c in db.calls if c[0] in ("PUT", "PATCH")]))
+
+    # (3) 서면 안 되는 줄
+    check("예정등록 — 이미 나간 항차는 세우지 않는다(OBWH 2705E·TNJP 26354E·STMJ 2643E·DJCT 0221E)",
+          not ({"OBWH_2705E", "TNJP_26354E", "STMJ_2643E", "DJCT_0221E", "RZOR_R083E",
+                "ATPR_2635E", "DXQD_2630E", "TMPZ_2023E"} & set(keys)), str(keys))
+    check("예정등록 — 비관할 항로는 세우지 않는다(NGTR PXS · PCSG PQS · XINP JWKP)",
+          not [k for k in keys if k.startswith(("NGTR_", "PCSG_", "XINP_"))], str(keys))
+    check("예정등록 — 정본표에 없는 배는 세우지 않는다(HDOT·HDOB·XINP)",
+          not [k for k in keys if k.startswith(("HDOT_", "HDOB_", "XINP_"))], str(keys))
+    check("예정등록 — 선사항차를 못 읽은 줄(유조선)은 세우지 않는다",
+          not [k for k in keys if k.split("_")[0] in ("HDOT", "HDOB")], str(keys))
+    off = _plain_cache()
+    core.set_tally(off, "OBWH", False)
+    db_off = FakeDB({})
+    au.register_expected(plan, off, master, db_off, cfg, lines.append)
+    check("예정등록 — 검수 대상 체크를 끈 배는 세우지 않는다(OBWH)",
+          not [k for k in db_off.data if k.startswith("voyages/OBWH_")],
+          str(sorted(db_off.data)[:4]))
+    closed = _plain_cache()
+    au.mark_closed("OBWH 2707E&2708W PTK DEP.TALLY REPORT.pdf", "OBWH", "2707E", closed)
+    db_cl = FakeDB({})
+    au.register_expected(plan, closed, master, db_cl, cfg, lines.append)
+    check("예정등록 — 기항 마감(DEP.TALLY)된 항차는 세우지 않는다(OBWH 2707E)",
+          "voyages/OBWH_2707E/info" not in db_cl.data
+          and "voyages/OBWH_2709E/info" in db_cl.data, str(sorted(db_cl.data)[:4]))
+    db_no = FakeDB({})
+    au.register_expected(plan, _plain_cache(), master, db_no,
+                         dict(cfg, expected_cards=False), lines.append)
+    check("예정등록 — 설정에서 끄면 아무것도 쓰지 않는다(expected_cards)",
+          not db_no.data and not [c for c in db_no.calls if c[0] != "GET"], str(db_no.calls))
+
+    # (4) 멱등 — 배정표 줄이 그대로면 다시 쓰지 않는다
+    before = len(db.calls)
+    out2 = au.register_expected(plan, cache, master, db, cfg, lines.append)
+    check("예정등록 — 두 번째 사이클은 쓰기(PUT/PATCH/DELETE) 0(멱등)",
+          not [c for c in db.calls[before:] if c[0] in ("PUT", "PATCH", "DELETE")]
+          and not out2["created"] and out2["skipped"] == 25,
+          "%s / skipped=%d" % ([c[:2] for c in db.calls[before:]
+                                if c[0] in ("PUT", "PATCH", "DELETE")], out2["skipped"]))
+    check("예정등록 — 두 번째 사이클은 서버를 읽지도 않는다(지문이 같으면 조회 0)",
+          not [c for c in db.calls[before:] if c[0] == "GET"
+               and c[1].startswith("voyages/") and c[1] != "voyages"],
+          str([c[:2] for c in db.calls[before:] if c[0] == "GET"][:5]))
+
+    # (5) 이미 있는 키 재사용 — 표기가 달라도 새 카드를 만들지 않는다(이중 카드 금지)
+    db2 = FakeDB({
+        "voyages/TNJP_026356E/info": _auto_info("TNJP", "026356E", voy_d="026356E"),
+        "voyages/TNJP_026356E/discharge/ediContainers": {
+            "OLDU1000001": {"cn": "OLDU1000001", "pod": "KRPTK", "bay": "12"}},
+    })
+    cache2, lines2 = _plain_cache(), []
+    out3 = au.register_expected(plan, cache2, master, db2, cfg, lines2.append)
+    keys2 = sorted(k.split("/")[1] for k in db2.data if k.endswith("/info"))
+    kept = db2.data.get("voyages/TNJP_026356E/info") or {}
+    check("예정등록 — 표기가 다른 같은 항차 키가 있으면 새 카드를 만들지 않는다(026356E ≡ 26356E)",
+          "TNJP_26356E" not in keys2 and "TNJP_026356E" in keys2
+          and "TNJP_026356E" in out3["filled"], str([k for k in keys2 if "TNJP" in k]))
+    check("예정등록 — 기존 카드는 0.6 보강 경로 그대로(상태·만든이 무접촉 · 일정만 채움)",
+          kept.get("autoStatus") == "collecting" and kept.get("createdBy") == "자동등록(수집기)"
+          and kept.get("voy_l") == "26356W" and kept.get("planSrc") == "plan"
+          and kept.get("berth") == "3번선석", json.dumps(kept, ensure_ascii=False))
+    check("예정등록 — 기존 카드의 자료 노드는 손대지 않는다",
+          db2.data.get("voyages/TNJP_026356E/discharge/ediContainers", {}).get("OLDU1000001"))
+
+    # (6) expected → collecting — 실자료가 처음 닿는 순간만 넘어간다
+    db3 = FakeDB({"voyages/OBWH_2707E/info": _expected_info("OBWH", "2707E", voy_d="2707E")})
+    lines3 = []
+    au.register_voyage(db3, "OBWH_2707E", "OBWH", "2707E", "2707E", "2708W", lines3.append)
+    check("전이 — 실자료 등록(source mail)이 예정 카드를 collecting 으로 넘긴다",
+          (db3.data.get("voyages/OBWH_2707E/info") or {}).get("autoStatus") == "collecting",
+          json.dumps(db3.data.get("voyages/OBWH_2707E/info"), ensure_ascii=False))
+    check("전이 — 만든이·만든시각 같은 다른 필드는 건드리지 않는다",
+          (db3.data.get("voyages/OBWH_2707E/info") or {}).get("createdBy") == "예정등록(수집기)"
+          and (db3.data.get("voyages/OBWH_2707E/info") or {}).get("createdAt") == 1785944829801)
+    db4 = FakeDB({"voyages/OBWH_2707E/info": _expected_info("OBWH", "2707E", voy_d="2707E")})
+    au.register_voyage(db4, "OBWH_2707E", "OBWH", "2707E", "2707E", "", lines3.append,
+                       plan.find("OBWH", ["2707E"]), source="plan")
+    au.register_voyage(db4, "OBWH_2707E", "OBWH", "2707E", "2707E", "", lines3.append,
+                       plan.find("OBWH", ["2707E"]), source="expected")
+    check("전이 — 배정표 보강·예정등록만으로는 넘어가지 않는다(자료가 진짜 와야 한다)",
+          (db4.data.get("voyages/OBWH_2707E/info") or {}).get("autoStatus") == "expected",
+          json.dumps(db4.data.get("voyages/OBWH_2707E/info"), ensure_ascii=False))
+    db5 = FakeDB({"voyages/OBWH_2707E/info": _auto_info("OBWH", "2707E", voy_d="2707E")})
+    before5 = len(db5.calls)
+    au.register_voyage(db5, "OBWH_2707E", "OBWH", "2707E", "2707E", "", lines3.append)
+    check("전이 — 이미 collecting 인 카드에는 상태를 다시 쓰지 않는다",
+          not [c for c in db5.calls[before5:] if c[0] == "PATCH"], str(db5.calls[before5:]))
+
+    # (7) 철수 — 배정표가 '나갔다'고 말하면 그 자리에서 치운다
+    sailed = _departed_plan(au, rows, "OBWH091", "2026-08-06 05:00")
+    lines4 = []
+    out4 = au.register_expected(sailed, cache, master, db, cfg, lines4.append)
+    check("철수 — 출항한 예정 카드를 그 사이클에 치운다(OBWH 2707E)",
+          out4["retired"] == ["OBWH_2707E"] and "voyages/OBWH_2707E/info" not in db.data,
+          "%s / %s" % (out4["retired"], "OBWH_2707E" in str(sorted(db.data))))
+    check("철수 — 사유를 로그에 남긴다(조용한 삭제 금지)",
+          any("예정 카드 철수" in l for l in lines4), "")
+    check("철수 — 다른 예정 카드는 그대로다",
+          "voyages/OBWH_2709E/info" in db.data and "voyages/TNJP_26356E/info" in db.data)
+    out5 = au.register_expected(sailed, cache, master, db, cfg, lines4.append)
+    check("철수 — 두 번째 판은 치울 것도 세울 것도 없다(멱등)",
+          not out5["retired"] and not out5["created"] and out5["errors"] == 0, str(out5))
+    db6 = FakeDB({
+        "voyages/OBWH_2707E/info": _expected_info("OBWH", "2707E", voy_d="2707E"),
+        "voyages/OBWH_2707E/records": {"r1": {"cn": "ZZZU9999999", "by": "김성일"}},
+    })
+    cache6 = _plain_cache()
+    cache6["expected"] = {"OBWH": {"2707E/2708W": {"sig": "x", "key": "OBWH_2707E"}}}
+    lines6 = []
+    out6 = au.register_expected(sailed, cache6, master, db6, cfg, lines6.append)
+    check("철수 — 검수 흔적이 있으면 지우지 않고 보고만 한다",
+          out6["held"] == ["OBWH_2707E"] and "voyages/OBWH_2707E/info" in db6.data, str(out6))
+    db7 = FakeDB({"voyages/OBWH_2707E/info": _auto_info("OBWH", "2707E", voy_d="2707E")})
+    cache7 = _plain_cache()
+    cache7["expected"] = {"OBWH": {"2707E/2708W": {"sig": "x", "key": "OBWH_2707E"}}}
+    au.register_expected(sailed, cache7, master, db7, cfg, lines6.append)
+    check("철수 — 자료가 닿아 collecting 이 된 카드는 예정 철수가 손대지 않는다",
+          "voyages/OBWH_2707E/info" in db7.data)
+
+    # (8) 기동 정리 — 배정표 창 밖으로 밀린 '빈 예정 카드'
+    db8 = FakeDB({
+        "voyages/ZZZA_1E/info": _expected_info("ZZZA", "1E", voy_d="1E"),
+        "voyages/ZZZB_1E/info": _expected_info("ZZZB", "1E", voy_d="1E"),
+        "voyages/ZZZB_1E/discharge/ediContainers": {
+            "OLDU1000001": {"cn": "OLDU1000001", "pod": "KRPTK"}},
+        "voyages/ZZZC_1E/info": _expected_info("ZZZC", "1E", voy_d="1E"),
+        "voyages/ZZZC_1E/records": {"r1": {"cn": "ZZZU9999999", "by": "김성일"}},
+        "voyages/ZZZD_1E/info": _auto_info("ZZZD", "1E", voy_d="1E"),
+        "voyages/ZZZE_1E/info": dict(_expected_info("ZZZE", "1E", voy_d="1E"),
+                                     autoRegistered=False, createdBy="김성일"),
+    })
+    cache8 = _plain_cache()
+    cache8["expected"] = {"ZZZA": {"1E/-": {"sig": "x", "key": "ZZZA_1E"}}}
+    lines8 = []
+    out8 = au.reconcile_with_plan(db8, cache8, plan, lines8.append)
+    check("기동 정리 — 배정표 창 밖으로 밀린 빈 예정 카드를 치운다(ZZZA)",
+          out8["deleted"] == ["ZZZA_1E"] and "voyages/ZZZA_1E/info" not in db8.data,
+          str(out8["deleted"]))
+    check("기동 정리 — 자료가 담긴 예정 카드는 치우지 않는다(ZZZB)",
+          "voyages/ZZZB_1E/info" in db8.data and "ZZZB_1E" not in out8["deleted"])
+    check("기동 정리 — 검수 흔적이 있는 예정 카드는 치우지 않는다(ZZZC)",
+          "voyages/ZZZC_1E/info" in db8.data and "ZZZC_1E" not in out8["deleted"])
+    check("기동 정리 — 자료를 받는 중(collecting)인 카드는 종전대로 손대지 않는다(ZZZD)",
+          "voyages/ZZZD_1E/info" in db8.data and "ZZZD_1E" not in out8["deleted"])
+    check("기동 정리 — 사람이 만든 카드는 예정 표시가 있어도 치우지 않는다(ZZZE)",
+          "voyages/ZZZE_1E/info" in db8.data and "ZZZE_1E" not in out8["deleted"])
+    check("기동 정리 — 지운 카드의 예정등록 지문도 함께 지운다(다시 세우지 않게)",
+          not (cache8.get("expected") or {}).get("ZZZA"),
+          json.dumps(cache8.get("expected"), ensure_ascii=False))
+    before8 = len(db8.calls)
+    out9 = au.reconcile_with_plan(db8, cache8, plan, lines8.append)
+    check("기동 정리 — 두 번째 판은 지울 것이 없다(멱등)",
+          not out9["deleted"] and not [c for c in db8.calls[before8:] if c[0] == "DELETE"],
+          str(out9["deleted"]))
 
 
 def main():
@@ -3047,6 +3324,7 @@ def main():
     test_heartbeat_shape()
     test_voyage_spelling()
     test_berth_schedule()
+    test_expected_cards()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)
