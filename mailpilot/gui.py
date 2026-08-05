@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.4 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
+# 메일파일럿 Uni 0.5 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
 # ⚠ 보안: 여기서 입력한 비밀번호는 config.json 에 평문 저장된다. 개인 PC 전용, 공용 PC 금지.
 """tkinter 설정 창.
 

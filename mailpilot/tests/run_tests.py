@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.4 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
+# 메일파일럿 Uni 0.5 테스트 러너 — 실서버 없이(픽스처·목) 판독·수집·POP3·파이어베이스·GUI를 전부 확인한다.
 """실행: python mailpilot/tests/run_tests.py
 
   1) 판독 유닛테스트 — 실제 유형 제목 12종 → 선박/항차/코드 표
@@ -21,6 +21,12 @@
  17) 선박 정본표 — 실제 미분류 제목이 정본 코드로 붙는지 · 별칭 오인 방지 · 마스터 없음 회귀
  18) 정본 이관 — 캐시 코드 갈아끼우기 · 폴더 병합(충돌 스킵) · 체크 이월 · 서버 노드 · 멱등
  19) GUI — 정본/미확인 행 표시 · [정본 연결…] 병합 · [항목 삭제] · [정본표 가져오기…]
+ 20) EDI 판독 모듈(edi_parser) — 종류 판별 4종 · 합성 최소 케이스 · 실파일 스냅샷
+     (기대값 정본은 검수앱 src/utils.js parseBAPLIE·parseAscFile 를 node 로 돌린 결과)
+ 21) 앱 채우기(app_upload) — 홈포트·짝 증거·info 계약(신규 PUT/기존 PATCH)·방향필터·
+     fail-open·전량제외 PUT 생략·좌표 보존·다수결 override·지문 멱등·null 부재
+ 22) 실파일 종단 — 미니 메일박스로 사이클 한 판 → 검수앱 항차·EDI 가 실제로 채워지는지
+ 23) 하트비트 — 앱 health.js 가 읽는 모양(at 은 ms 숫자, cycleMin)
 """
 
 import datetime
@@ -33,6 +39,7 @@ import poplib
 import shutil
 import sys
 import tempfile
+import time
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1594,6 +1601,715 @@ def test_gui_master():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ────────────────────── 20) EDI 판독 모듈 — 4형식 · 실파일 스냅샷 ──────────────────────
+#   기준: 검수앱 src/utils.js 의 parseBAPLIE·parseAscFile. 아래 기대값은 그 JS 를 node 로
+#   돌린 결과와 실표본 24파일·10,299컨(전수 스윕은 709파일·276,192컨)에서 100% 일치한 값이다.
+
+# 합성 최소 케이스 — 표준 EDIFACT BAPLIE (리퍼+온도+위험물+환적 3단 + 부킹 슬롯)
+SYN_BAPLIE = (
+    "UNB+UNOA:2+SND+RCV+260101:0000+1'\n"
+    "UNH+1+BAPLIE:D:95B:UN:SMDG20'\n"
+    "TDT+20+2609S+++:172:20+++V7A5452:103::PEGASUS PROTO'\n"
+    "LOC+5+KRPTK:139:6'\n"
+    "DTM+178:2601011200:203'\n"
+    "LOC+147+0100284::5'\n"
+    "MEA+VGM++KGM:24500'\n"
+    "LOC+9+KRPTK'\n"
+    "LOC+11+CNSHA'\n"
+    "LOC+76+CNNGB'\n"
+    "LOC+83+KRPUS'\n"
+    "LOC+97+JPSKT'\n"
+    "TMP+2+-018:CEL'\n"
+    "EQD+CN+ABCU1234567+4530+++5'\n"
+    "DGS+IMD+3+1170++2'\n"
+    "NAD+CA+DJS:172:20'\n"
+    "RFF+BM:BL0001'\n"
+    "LOC+147+0100286::5'\n"
+    "MEA+WT++KGM:2200'\n"
+    "LOC+9+KRPTK'\n"
+    "LOC+11+CNDLC'\n"
+    "EQD+CN++2200+++4'\n"
+    "FTX+AAY+++SKR  extra'\n"
+    "UNT+22+1'\n"
+    "UNZ+1+1'\n"
+)
+
+# 합성 최소 케이스 — 숫자코드 BAPLIE (CASP/CKL 계열)
+SYN_NUMERIC = (
+    "00:BAPLIE:BAYPLAN:9:TWE000001:CASP:2607052323'\n"
+    "10:TMPZ:TIANHAI PINGZE:CN:2020W:DWS:::260705:KRPTK:PTK:CNNGB'\n"
+    + ":".join(["50", "DWSU3001375", "2200", "F", "0010282", "", "", "", "", "",
+                "", "", "", "", "20300.0", "", "TJM"]) + "'\n"
+    "52:KRPTK::CNSHA::CNSHA:::'\n"
+    + ":".join(["50", "RFXU1234567", "4530", "F", "0020184", "C", "-018", "", "",
+                "", "", "", "", "", "12000", "", "EAS"]) + "'\n"
+    "52:KRPTK::CNSHA::CNSHA:::'\n"
+)
+
+# 합성 최소 케이스 — 숫자코드 IFCSUM (RIZHAO 계열, 같은 컨번호 B/L split 병합)
+SYN_IFCSUM = (
+    "00:IFCSUM:MANIFEST:9:560100333:HTFR:20260726115429'\n"
+    "10:HOAG:RIZHAO ORIENT:PA:R079E:::20260726:20260727::RIZHAO:::'\n"
+    "12:BL001::::::CNRZH:RIZHAO:11:PP:20260726::::'\n"
+    "13:KRPTK:PYEONGTAEK:KRPTK:PYEONGTAEK:::::'\n"
+    "47:WOODEN FURNITURE::::'\n"
+    "51:0:CICU8421595:008497:40HC:F:88:5430::68::::::'\n"
+    "12:BL002::::::CNRZH:RIZHAO:11:PP:20260726::::'\n"
+    "13:KRPTK:PYEONGTAEK:KRPTK:PYEONGTAEK:::::'\n"
+    "47:STEEL COIL::::'\n"
+    "51:0:CICU8421595:008497:40HC:F:88:1000::68::::::'\n"
+    "51:1:TEST1234567:000000:40RH:E:1:0::::::::'\n"
+)
+
+# 실파일 발췌 — DJCF 0149S PTK.ASC 의 $604 머리 + 실제 본문 3줄(드라이 풀 · 리퍼 15.0℃ · 엠티)
+SYN_ASC = (
+    "$604DJCF/DONGJIN CONFIDENT   /0149S       /            /POL:PTK/260720  "
+    "/RECORD=0674/F           /            NTX//NTX                   "
+    "/00674                         \n"
+    "010482 BMOU1563063 DJS     INCSGN           DC20191F        0001"
+    "                       19140" + " " * 80 + "KRINCBNSGN\n"
+    "060482 HALU8500868 HAS     INCPUS           RFHC089F    150C    "
+    "                       08922" + " " * 80 + "KRINCKRPUS\n"
+    "030786 HALU2025400 HAS     PTKKAN           DC20022E        "
+    "                           02200" + " " * 80 + "KRPTKKRKAN\n"
+)
+
+# 실파일 스냅샷 — DPRT2609SPTK.EDI 머리 + 실제 컨 3대(드라이 · 리퍼 5.0℃ · 위험물)
+REAL_EDI_SNAPSHOT = (
+    "UNB+UNOA:2+TWE000001+CASP+20260725:0553+0'\n"
+    "UNH+1+BAPLIE:D:95B:UN:SMDG20'\n"
+    "BGM++0+9'\n"
+    "DTM+137:202607250553:203'\n"
+    "TDT+20+2609S+++:172:20+++V7A5452:103::PEGASUS PROTO'\n"
+    "LOC+5+KRPTK:139:6'\n"
+    "DTM+178:2607250553:203'\n"
+    "LOC+147+0010682::5'\n"
+    "MEA+WT++KGM:28200'\n"
+    "LOC+9+BNSGN'\n"
+    "LOC+11+KRKAN'\n"
+    "LOC+83+KRKAN'\n"
+    "RFF+BM:1'\n"
+    "EQD+CN+DJLU2160636+2200+++5'\n"
+    "NAD+CA+DJS:172:20'\n"
+    "LOC+147+0060682::5'\n"
+    "MEA+WT++KGM:22200'\n"
+    "TMP+2+05.0:CEL'\n"
+    "LOC+9+TKBKK'\n"
+    "LOC+11+KRPUS'\n"
+    "RFF+BM:1'\n"
+    "EQD+CN+BMOU9840061+4530+++5'\n"
+    "NAD+CA+NSS:172:20'\n"
+    "LOC+147+0010282::5'\n"
+    "MEA+WT++KGM:21810'\n"
+    "LOC+9+KRPTK'\n"
+    "LOC+11+KRKAN'\n"
+    "RFF+BM:1'\n"
+    "EQD+CN+TGIU3246581+2270+++5'\n"
+    "NAD+CA+HAS:172:20'\n"
+    "DGS+IMD+3+1219'\n"
+)
+
+# 실표본 전체 파일(있으면 함께 검사) — 파일이 없는 PC 에서는 발췌 스냅샷만으로 통과한다.
+REAL_FULL_FILES = [
+    # (상대경로, 종류, 선박, 항차, 컨수)
+    ("DPRT/260725_DPRT-2608N&2609S PTK DEP.TALLY REPORT/DPRT2609SPTK.EDI",
+     "edi", "PEGASUS PROTO", "2609S", 836),
+    ("ATPR/260709_ATPR 2632W PTK DEP. TALLY REPORT/ATPR 2632W PTK.ASC",
+     "asc", "ATLANTIC PIONEER", "2632W", 370),
+    ("TMPZ/260705_TMPZ 2020E&W PTK DEP. TALLY REPORT/TMPZ 2020W PTK(MOC).edi",
+     "numeric", "TIANHAI PINGZE", "2020W", 265),
+]
+SAMPLES_ROOT = os.path.join(os.path.dirname(os.path.dirname(PKG)), "_tally_samples")
+
+
+def _cn_of(containers, cn):
+    for c in containers:
+        if c["cn"] == cn:
+            return c
+    return {}
+
+
+def test_edi_parser():
+    print("\n[20] EDI 판독 모듈 — 종류 판별 · BAPLIE/숫자코드/IFCSUM/ASC · 실파일 스냅샷")
+    try:
+        import edi_parser as ep
+    except Exception as exc:
+        check("edi_parser 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+
+    # (1) 종류 판별
+    check("종류 판별 — ASC($604)", ep.detect_kind(SYN_ASC, "x.asc") == "asc")
+    check("종류 판별 — 숫자코드 BAPLIE(00:BAPLIE)",
+          ep.detect_kind(SYN_NUMERIC, "x.edi") == "numeric")
+    check("종류 판별 — 숫자코드 IFCSUM(00:IFCSUM)",
+          ep.detect_kind(SYN_IFCSUM, "x.txt") == "ifcsum")
+    check("종류 판별 — 표준 EDIFACT(UNB/UNH)",
+          ep.detect_kind(SYN_BAPLIE, "x.edi") == "edi")
+
+    # (2) 표준 BAPLIE
+    r = ep.parse_edi(SYN_BAPLIE, "syn.edi")
+    check("BAPLIE — 종류·선박·항차·콜사인",
+          r["kind"] == "edi" and r["vessel"] == "PEGASUS PROTO"
+          and r["voy"] == "2609S" and r["callsign"] == "V7A5452",
+          "%s / %s / %s" % (r["vessel"], r["voy"], r["callsign"]))
+    check("BAPLIE — 컨 2대(부킹 슬롯 포함)", len(r["containers"]) == 2,
+          str(len(r["containers"])))
+    c0 = r["containers"][0]
+    check("BAPLIE — 좌표 LOC+147(선행 0 제거)",
+          (c0["bay"], c0["row"], c0["tier"]) == ("10", "02", "84"),
+          "%s-%s-%s" % (c0["bay"], c0["row"], c0["tier"]))
+    check("BAPLIE — LOC 매핑(9=POL, 11=POD, 76=npod, 83=tspot, 97=fpod)",
+          (c0["pol"], c0["pod"], c0["npod"], c0["tspot"], c0["fpod"])
+          == ("KRPTK", "CNSHA", "CNNGB", "KRPUS", "JPSKT"))
+    check("BAPLIE — VGM 중량 우선", c0["wt"] == 24500 and c0["wtt"] == "VGM")
+    check("BAPLIE — TMP+2 온도 정규화('-018'→'-18') + rf",
+          c0["tmp"] == "-18" and c0["rf"] is True, c0["tmp"])
+    check("BAPLIE — DGS+IMD 위험물(클래스·UN·PG)",
+          c0["dg"] is True and (c0["dgc"], c0["un"], c0["pg"]) == ("3", "1170", "2"))
+    check("BAPLIE — NAD+CA 선사 · RFF+BM B/L · 항차 복사",
+          c0["op"] == "DJS" and c0["bl"] == "BL0001" and c0["voy"] == "2609S")
+    c1 = r["containers"][1]
+    check("BAPLIE — 부킹 슬롯 __BOOK_ 임시 ID",
+          c1["cn"] == "__BOOK_10_02_86" and c1["isBooking"] is True
+          and c1["pendingCn"] is True and c1["l4"] == "", c1["cn"])
+    check("BAPLIE — EQD status 4=Empty + ISO 끝자리 보정(2200→220E)",
+          c1["fe"] == "E" and c1["iso"] == "220E"
+          and c1["iso_orig_parsed"] == "2200" and c1["st"] == "4")
+    check("BAPLIE — FTX+AAY 선사(5자 자르기)", c1["op"] == "SKR", c1["op"])
+    check("BAPLIE — 빈 값은 ''·0·False (None 없음)",
+          all(v is not None for c in r["containers"] for v in c.values()))
+
+    # (3) 숫자코드 BAPLIE
+    n = ep.parse_edi(SYN_NUMERIC, "syn_moc.edi")
+    check("숫자코드 BAPLIE — 종류·선박·항차·콜사인",
+          n["kind"] == "numeric" and n["vessel"] == "TIANHAI PINGZE"
+          and n["voy"] == "2020W" and n["callsign"] == "TMPZ")
+    check("숫자코드 BAPLIE — 컨 2대", len(n["containers"]) == 2)
+    n0, n1 = n["containers"]
+    check("숫자코드 BAPLIE — 50 세그먼트(좌표·중량·선사)",
+          (n0["bay"], n0["row"], n0["tier"]) == ("1", "02", "82")
+          and n0["wt"] == 20300 and n0["op"] == "TJM",
+          "%s-%s-%s / %s" % (n0["bay"], n0["row"], n0["tier"], n0["wt"]))
+    check("숫자코드 BAPLIE — 52 세그먼트(POL/POD/FPOD)",
+          (n0["pol"], n0["pod"], n0["fpod"]) == ("KRPTK", "CNSHA", "CNSHA"))
+    check("숫자코드 BAPLIE — 온도 필드(:C:-018) → rf + '-18'",
+          n1["rf"] is True and n1["tmp"] == "-18", n1["tmp"])
+
+    # (4) 숫자코드 IFCSUM
+    f = ep.parse_edi(SYN_IFCSUM, "syn_ifcsum.txt")
+    check("IFCSUM — 종류·선박·항차", f["kind"] == "ifcsum"
+          and f["vessel"] == "RIZHAO ORIENT" and f["voy"] == "R079E")
+    check("IFCSUM — B/L split 은 물리 1대로 병합", len(f["containers"]) == 2,
+          str(len(f["containers"])))
+    g0 = _cn_of(f["containers"], "CICU8421595")
+    check("IFCSUM — 병합 시 중량 합산", g0.get("wt") == 6430, str(g0.get("wt")))
+    check("IFCSUM — 병합 시 B/L·품명 병기",
+          g0.get("bl") == "BL001,BL002"
+          and g0.get("desc") == "WOODEN FURNITURE / STEEL COIL",
+          "%s / %s" % (g0.get("bl"), g0.get("desc")))
+    check("IFCSUM — ISO 텍스트 정규화(40HC→4500) · POL/POD",
+          g0.get("iso") == "4500" and g0.get("pol") == "CNRZH"
+          and g0.get("pod") == "KRPTK")
+    g1 = _cn_of(f["containers"], "TEST1234567")
+    check("IFCSUM — 40RH→45R1 리퍼 판정 · 엠티는 eseal 로",
+          g1.get("iso") == "45R1" and g1.get("rf") is True
+          and g1.get("fe") == "E" and g1.get("eseal") == "000000"
+          and g1.get("sl") == "")
+
+    # (5) ASC
+    a = ep.parse_edi(SYN_ASC, "syn.asc")
+    check("ASC — 종류·선박·항차·서비스코드",
+          a["kind"] == "asc" and a["vessel"] == "DONGJIN CONFIDENT"
+          and a["voy"] == "0149S" and a["serviceCode"] == "DJCF",
+          "%s / %s / %s" % (a["vessel"], a["voy"], a["serviceCode"]))
+    check("ASC — 컨 3대", len(a["containers"]) == 3, str(len(a["containers"])))
+    a0, a1, a2 = a["containers"]
+    check("ASC — 좌표(0-6) · 컨번호(7-18) · 선사(19-22)",
+          (a0["bay"], a0["row"], a0["tier"]) == ("1", "04", "82")
+          and a0["cn"] == "BMOU1563063" and a0["op"] == "DJS")
+    check("ASC — 타입코드(44-54) DC20 → 22GP · 중량 19140",
+          a0["iso"] == "22GP" and a0["tp"] == "DC20" and a0["wt"] == 19140)
+    check("ASC — 리퍼 RFHC → 45R1 · 온도 '150C' → 15.0℃",
+          a1["iso"] == "45R1" and a1["rf"] is True and a1["tmp"] == "15.0℃",
+          a1["tmp"])
+    check("ASC — 엠티 ISO 끝자리 보정(22GP→22GE)",
+          a2["fe"] == "E" and a2["iso"] == "22GE")
+    check("ASC — POL/POD 끝 10자리 · routeCode",
+          (a0["pol"], a0["pod"], a0["routeCode"]) == ("KRINC", "BNSGN", "KRINCBNSGN"))
+
+    # (6) 실파일 스냅샷 — DPRT 2609S 발췌 3대
+    s = ep.parse_edi(REAL_EDI_SNAPSHOT, "DPRT2609SPTK.EDI")
+    check("실파일 스냅샷 — 선박·항차·POL·ETD",
+          s["vessel"] == "PEGASUS PROTO" and s["voy"] == "2609S"
+          and s["pol"] == "KRPTK" and s["etd"] == "26072505",
+          "%s / %s / %s" % (s["vessel"], s["voy"], s["etd"]))
+    check("실파일 스냅샷 — 컨 3대", len(s["containers"]) == 3)
+    s0 = _cn_of(s["containers"], "DJLU2160636")
+    check("실파일 스냅샷 — DJLU2160636 (2200 · 1-06-82 · 28200 · tspot KRKAN)",
+          (s0.get("iso"), s0.get("tp"), s0.get("bay"), s0.get("row"), s0.get("tier"),
+           s0.get("wt"), s0.get("tspot"), s0.get("op"), s0.get("st"))
+          == ("2200", "20'GP", "1", "06", "82", 28200, "KRKAN", "DJS", "5"),
+          json.dumps(s0, ensure_ascii=False))
+    s1 = _cn_of(s["containers"], "BMOU9840061")
+    check("실파일 스냅샷 — BMOU9840061 리퍼 4530 · 온도 '05.0'→'5.0'",
+          s1.get("iso") == "4530" and s1.get("rf") is True and s1.get("tmp") == "5.0",
+          str(s1.get("tmp")))
+    s2 = _cn_of(s["containers"], "TGIU3246581")
+    check("실파일 스냅샷 — TGIU3246581 탱크(2270 → tk) · 위험물 3/1219",
+          s2.get("tk") is True and s2.get("dg") is True
+          and (s2.get("dgc"), s2.get("un")) == ("3", "1219"))
+
+    # (7) 실표본 원본 파일이 이 PC 에 있으면 통째로도 확인한다
+    seen = 0
+    for rel, kind, vsl, voy, cnt in REAL_FULL_FILES:
+        path = os.path.join(SAMPLES_ROOT, rel.replace("/", os.sep))
+        if not os.path.exists(path):
+            continue
+        seen += 1
+        with open(path, "rb") as fh:
+            text = fh.read().decode("utf-8", errors="replace")
+        got = ep.parse_edi(text, path)
+        check("실표본 %s — 종류·선박·항차·컨수" % os.path.basename(path),
+              got["kind"] == kind and got["vessel"] == vsl
+              and got["voy"] == voy and len(got["containers"]) == cnt,
+              "%s / %s / %s / %d대" % (got["kind"], got["vessel"], got["voy"],
+                                       len(got["containers"])))
+    if seen == 0:
+        print("  [i] _tally_samples 원본이 없어 발췌 스냅샷만 검사했다.")
+
+
+# ────────────────────── 21) 0.5 앱 채우기 — 항차·EDI 를 검수앱에 올린다 ──────────────────────
+#   가짜 파이어베이스(경로→값 사전)로만 돈다. 실 서버에는 한 글자도 안 나간다.
+
+class FakeDB:
+    """RTDB 대역 — 경로를 그대로 열쇠로 쓰는 사전. 호출 기록을 남겨 '무엇을 썼는지' 본다."""
+
+    enabled = True
+
+    def __init__(self, initial=None):
+        self.data = json.loads(json.dumps(initial or {}, ensure_ascii=False))
+        self.calls = []
+        self.vessels, self.beats, self.logs = [], [], []
+
+    @staticmethod
+    def _p(path):
+        return str(path).strip("/")
+
+    def get(self, path, params=None):
+        self.calls.append(("GET", self._p(path), None))
+        value = self.data.get(self._p(path))
+        return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
+
+    def put(self, path, obj):
+        self.calls.append(("PUT", self._p(path), obj))
+        self.data[self._p(path)] = json.loads(json.dumps(obj, ensure_ascii=False))
+        return {"ok": True}
+
+    def patch(self, path, obj):
+        self.calls.append(("PATCH", self._p(path), obj))
+        cur = self.data.setdefault(self._p(path), {})
+        if isinstance(cur, dict):
+            cur.update(json.loads(json.dumps(obj, ensure_ascii=False)))
+        return {"ok": True}
+
+    # 0.3/0.4 경로(사이클 보고)도 받아 준다 — Collector 종단 시험용
+    def register_vessel(self, code, name, last_mail_at=None, tally=None):
+        self.vessels.append({"code": code, "name": name, "tally": tally})
+        return {"ok": True}
+
+    def heartbeat(self, mails, files, skipped):
+        self.beats.append((mails, files, skipped))
+        return {"ok": True}
+
+    def write_collect_log(self, summary):
+        self.logs.append(summary)
+        return {"ok": True}
+
+    def writes(self, method=None):
+        return [c for c in self.calls if method is None or c[0] == method]
+
+
+def _quiet(_msg):
+    """시험용 로그 — 화면을 더럽히지 않는다(실패 원인은 check 상세로 본다)."""
+    return None
+
+
+AU_MASTER = [
+    {"code": "DJCT", "name": "DONGJIN CONTINENTAL", "aliases": [], "ko": []},
+    {"code": "ATPR", "name": "ATLANTIC PIONEER", "aliases": [], "ko": []},
+    {"code": "STSE", "name": "SITC SENDAI", "aliases": [], "ko": []},
+    {"code": "XTPG", "name": "XIN TAI PING", "aliases": [], "ko": []},
+]
+
+
+def _syn_baplie(voy, rows, vessel="TEST SHIP"):
+    """합성 BAPLIE — rows: [(컨번호, ISO, POL, POD, 'bay/row/tier 7자리')]."""
+    out = ["UNB+UNOA:2+SND+RCV+260101:0000+1'",
+           "UNH+1+BAPLIE:D:95B:UN:SMDG20'",
+           "TDT+20+%s+++:172:20+++V7A5452:103::%s'" % (voy, vessel),
+           "LOC+5+KRPTK:139:6'",
+           "DTM+178:2601011200:203'"]
+    for cn, iso, pol, pod, pos in rows:
+        out.append("LOC+147+%s::5'" % pos)
+        out.append("MEA+WT++KGM:12000'")
+        if pol:
+            out.append("LOC+9+%s'" % pol)
+        if pod:
+            out.append("LOC+11+%s'" % pod)
+        out.append("EQD+CN+%s+%s+++5'" % (cn, iso))
+    out.append("UNT+%d+1'" % (len(out) + 1))
+    out.append("UNZ+1+1'")
+    return "\n".join(out) + "\n"
+
+
+def _mk(root, rel, text):
+    path = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="latin1", errors="replace") as fh:
+        fh.write(text)
+    return path
+
+
+def _nulls(obj, trail="$"):
+    """RTDB 로 나간 값 안에 None 이 있는지 재귀로 훑는다(null = 삭제라 절대 보내면 안 된다)."""
+    bad = []
+    if obj is None:
+        bad.append(trail)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            bad += _nulls(v, "%s.%s" % (trail, k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            bad += _nulls(v, "%s[%d]" % (trail, i))
+    return bad
+
+
+def test_app_upload():
+    print("\n[21] 0.5 앱 채우기 — 홈포트·짝·info 계약·방향필터·좌표보존·지문")
+    try:
+        import app_upload as au
+    except Exception as exc:
+        check("app_upload 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+
+    # (1) 홈포트 판정 — 앱 JS isPyeongtaekPort 와 같은 기준
+    check("홈포트 — 별칭·접미사 다 잡는다",
+          all(au.is_home_port(x) for x in ("PTK", "KRPTK", "KRPYT", "KRPYOTM", "KRPYO", "XXPYT"))
+          and not any(au.is_home_port(x) for x in ("", None, "CNSHA", "KRPUS", "PYOT")))
+    check("홈포트 — 설정 별칭으로 다른 항도 된다",
+          au.is_home_port("KRINC", ["KRINC"]) and not au.is_home_port("KRPUS", ["KRINC"]))
+
+    # (2) 항차 방향
+    check("항차 방향 — E/N 양하 · W/S 선적 · 그 외 빈값",
+          (au.voy_direction("0221E"), au.voy_direction("2607N"), au.voy_direction("0222W"),
+           au.voy_direction("631S"), au.voy_direction("2635")) ==
+          ("discharge", "discharge", "loading", "loading", ""))
+
+    # (3) 짝 증거 — 실제 제목·첨부명 그대로
+    check("짝 증거 — 0221E&0222W(양쪽 표기)",
+          au.find_pairs("DJCT 0221E&0222W PTK TALLY REPORT.xlsx") == [("0221E", "0222W")])
+    check("짝 증거 — R083E&W(뒤 생략)",
+          au.find_pairs("RO R083E&W PTK TALLY REPORT.pdf") == [("R083E", "R083W")])
+    check("짝 증거 — 2705E & 2706W(사이 공백)",
+          au.find_pairs("OCEAN BLUE WHALE 2705E & 2706W PTK TALLY REPORT.xls")
+          == [("2705E", "2706W")])
+    check("짝 증거 — 2608N&2609S(북/남 항로)",
+          au.find_pairs("DPRT-2608N&2609S PTK DEP.TALLY REPORT") == [("2608N", "2609S")])
+    check("짝 증거 — E&0222W(앞 항차는 폴더에서)",
+          au.find_pairs("DJCT E&0222W REPORT", context_voy="0221E") == [("0221E", "0222W")])
+    check("짝 증거 — 없는 곳에서 만들어 내지 않는다",
+          au.find_pairs("ATPR 2635W WEI 공컨 씰체결 리스트.xlsx") == []
+          and au.find_pairs("ATPR 2635E & WEIHAI LIST") == []
+          and au.find_pairs("STSE 2657E PTK.ASC") == [])
+    cache = {"names": {}, "codes": {}}
+    au.collect_pairs("DJCT 0221E&0222W PTK TALLY REPORT.xlsx", "DJCT", cache)
+    check("짝 캐시 — 양방향으로 기록",
+          au.paired_partner(cache, "DJCT", "0221E") == "0222W"
+          and au.paired_partner(cache, "DJCT", "0222W") == "0221E"
+          and au.paired_partner(cache, "DJCT", "9999E") == "")
+    check("짝 캐시 — 두 번 넣어도 새 짝은 0(로그 폭주 방지)",
+          au.collect_pairs("DJCT 0221E&0222W", "DJCT", cache) == [])
+
+    # (4) 대표 선정 4단 비교 — ① 해당 방향 홈포트분 ② 실번호 ③ 규격 ④ 총수
+    a = {"dis_home": 5, "load_home": 0, "cn_count": 3, "iso_count": 3, "total": 3}
+    b = {"dis_home": 4, "load_home": 0, "cn_count": 90, "iso_count": 90, "total": 90}
+    check("대표 4단 — 평택분이 1순위(총수 많은 타항 자료를 이긴다)",
+          au._rank(a, "discharge") > au._rank(b, "discharge"))
+    c1 = {"dis_home": 5, "load_home": 0, "cn_count": 5, "iso_count": 1, "total": 5}
+    c2 = {"dis_home": 5, "load_home": 0, "cn_count": 5, "iso_count": 4, "total": 5}
+    check("대표 4단 — 동률이면 규격(iso) 보유 수", au._rank(c2, "discharge") > au._rank(c1, "discharge"))
+
+    # (5) 종단 — 미니 메일박스 한 판
+    tmp = tempfile.mkdtemp(prefix="mailpilot_upload_")
+    try:
+        root = os.path.join(tmp, "MB")
+        # 양하 폴더 — 평택 POD 2대 + 타항 1대 + POL/POD 둘 다 빈 1대(fail-open)
+        _mk(root, "DJCT/0221E/DJCT 0221E&0222W PTK TALLY REPORT.xlsx", "not-an-edi")
+        _mk(root, "DJCT/0221E/DJCT 0221E PTK.edi", _syn_baplie("0221E", [
+            ("ABCU1234567", "2200", "CNSHA", "KRPTK", "0100284"),
+            ("ABCU1234568", "4500", "CNNGB", "KRPYOTM", "0100286"),
+            ("ABCU1234569", "2200", "CNSHA", "KRPUS", "0100288"),
+            ("ABCU1234570", "2200", "", "", "0100482"),
+        ]))
+        # 선적 폴더(짝) — 평택 POL 2대
+        _mk(root, "DJCT/0222W/DJCT 0222W PTK.edi", _syn_baplie("0222W", [
+            ("BBBU1000001", "2200", "KRPTK", "CNSHA", "0200284"),
+            ("BBBU1000002", "4500", "PTK", "CNNGB", "0200286"),
+        ]))
+        # 방향이 어긋난 폴더 — E 폴더인데 안에 든 것은 선적 EDI(다수결 override)
+        _mk(root, "STSE/2657E/STSE 2658W PTK.edi", _syn_baplie("2658W", [
+            ("CCCU2000001", "2200", "KRPTK", "CNSHA", "0300284"),
+            ("CCCU2000002", "2200", "KRPTK", "CNNGB", "0300286"),
+        ]))
+        # 타항 자료만 든 폴더 — 방향필터 전량 제외 → PUT 자체를 하면 안 된다
+        _mk(root, "ATPR/2632W/INCB.edi", _syn_baplie("2632W", [
+            ("DDDU3000001", "2200", "KRINC", "CNSHA", "0400284"),
+        ]))
+        # 정본표에 없는 선박 · 검수 대상이 아닌 선박 · _미분류 는 건드리지 않는다
+        _mk(root, "UNAT/2635W/x.edi", _syn_baplie("2635W", [("EEEU4000001", "2200", "KRPTK", "CNSHA", "0500284")]))
+        _mk(root, "XTPG/0535E/y.edi", _syn_baplie("0535E", [("FFFU5000001", "2200", "CNSHA", "KRPTK", "0600284")]))
+        _mk(root, "_미분류/20260801_무엇/z.edi", _syn_baplie("9999E", [("GGGU6000001", "2200", "CNSHA", "KRPTK", "0700284")]))
+
+        db = FakeDB({"voyages/ATPR_2632W/loading/ediContainers": {
+            "OLDU9999999": {"cn": "OLDU9999999", "pol": "KRPTK", "bay": "70"}}})
+        cache2 = {"names": {}, "codes": {}, "tally": {"XTPG": False}}
+        state = os.path.join(tmp, "upload_state.json")
+        res = au.run(root, cache2, AU_MASTER, db, {}, _quiet, state_path=state)
+
+        keys = sorted(res["registered"])
+        check("짝 증거대로 한 키로 묶인다(0221E/0222W → DJCT_0221E)",
+              keys == ["ATPR_2632W", "DJCT_0221E", "STSE_2657E"],
+              "등록 키 %s" % keys)
+        info = db.data.get("voyages/DJCT_0221E/info") or {}
+        check("info 신규 PUT 계약 — 필드·타입",
+              info.get("vsl") == "DJCT" and info.get("voy") == "0221E"
+              and info.get("mode") == "discharge"
+              and isinstance(info.get("createdAt"), int) and info["createdAt"] > 0
+              and info.get("createdBy") == "자동등록(수집기)"
+              and info.get("autoRegistered") is True
+              and info.get("autoStatus") == "collecting"
+              and info.get("voy_d") == "0221E" and info.get("voy_l") == "0222W",
+              json.dumps(info, ensure_ascii=False))
+        check("정본표에 없는 선박(UNAT)·검수 대상 아님(XTPG)·_미분류 는 등록하지 않는다",
+              "voyages/UNAT_2635W/info" not in db.data
+              and "voyages/XTPG_0535E/info" not in db.data
+              and not [k for k in db.data if "_9999E" in k])
+
+        edi_d = db.data.get("voyages/DJCT_0221E/discharge/ediContainers") or {}
+        check("방향 필터 — 양하는 POD 평택분만(+판정불가 보존)",
+              sorted(edi_d.keys()) == ["ABCU1234567", "ABCU1234568", "ABCU1234570"],
+              "남은 컨 %s" % sorted(edi_d.keys()))
+        check("fail-open — POL·POD 둘 다 빈 컨은 지우지 않는다",
+              "ABCU1234570" in edi_d and edi_d["ABCU1234570"]["_mode"] == "transit")
+        check("_slotKey·_mode 표식",
+              edi_d["ABCU1234567"]["_slotKey"] == "ABCU1234567"
+              and edi_d["ABCU1234567"]["_mode"] == "discharge")
+        raw = db.data.get("voyages/DJCT_0221E/discharge/raw/edi") or {}
+        check("raw/edi 계약 — 원문·파일명·파서판·크기·시각",
+              raw.get("fileName") == "DJCT 0221E PTK.edi"
+              and raw.get("parserVersion") == au.PARSER_TAG
+              and isinstance(raw.get("uploadedAt"), int)
+              and raw.get("sizeBytes") == len(raw.get("text") or "")
+              and "EQD+CN+ABCU1234567" in (raw.get("text") or ""))
+
+        edi_l = db.data.get("voyages/DJCT_0221E/loading/ediContainers") or {}
+        check("짝 선적 폴더는 같은 키의 loading 노드로 들어간다",
+              sorted(edi_l.keys()) == ["BBBU1000001", "BBBU1000002"]
+              and all(v["_mode"] == "loading" for v in edi_l.values()),
+              "선적 컨 %s" % sorted(edi_l.keys()))
+
+        check("다수결 override — E 폴더인데 내용이 선적이면 loading 노드",
+              "voyages/STSE_2657E/loading/ediContainers" in db.data
+              and "voyages/STSE_2657E/discharge/ediContainers" not in db.data
+              and len(db.data["voyages/STSE_2657E/loading/ediContainers"]) == 2)
+
+        check("방향필터 전량 제외 → PUT 생략(기존 노드 그대로 보존)",
+              (db.data.get("voyages/ATPR_2632W/loading/ediContainers") or {}).keys()
+              == {"OLDU9999999"}
+              and "voyages/ATPR_2632W/loading/raw/edi" not in db.data)
+        check("자료가 타항뿐이어도 항차(info)는 등록한다(홈에 카드는 뜬다)",
+              (db.data.get("voyages/ATPR_2632W/info") or {}).get("voy_l") == "2632W")
+
+        bad = []
+        for path, value in db.data.items():
+            bad += _nulls(value, path)
+        check("RTDB 로 나간 값에 null 이 하나도 없다", not bad, "null 자리 %s" % bad[:3])
+
+        # (6) 지문 멱등 — 두 번째 사이클은 아무것도 쓰지 않는다
+        db.calls = []
+        res2 = au.run(root, cache2, AU_MASTER, db, {}, _quiet, state_path=state)
+        check("짝으로 묶인 폴더 2개가 항차 1개로 센다(같은 노드 두 번 쓰지 않는다)",
+              res["folders"] == 4 and res["voyages"] == 3,
+              "폴더 %d · 항차 %d" % (res["folders"], res["voyages"]))
+        check("지문 멱등 — 같은 자료면 두 번째 사이클 업로드 0 · 쓰기 0",
+              res2["uploads"] == 0 and res2["changed"] == 0 and res2["skipped"] == 3
+              and not db.writes("PUT") and not db.writes("PATCH"),
+              "changed=%d skipped=%d put=%d" % (res2["changed"], res2["skipped"],
+                                                len(db.writes("PUT"))))
+
+        # (7) 자료가 바뀌면 다시 올린다 + 좌표 보존 + 기존 info 는 안 덮는다
+        db.data["voyages/DJCT_0221E/info"] = {
+            "vsl": "DJCT", "voy": "0221E", "mode": "discharge",
+            "createdBy": "김성일", "voy_d": "0221E", "berth": "1번",
+        }
+        db.data["voyages/DJCT_0221E/discharge/ediContainers"]["ABCU1234567"]["bay"] = "77"
+        db.data["voyages/DJCT_0221E/discharge/ediContainers"]["ABCU1234567"]["pos"] = "770284"
+        _mk(root, "DJCT/0221E/DJCT 0221E PTK.edi", _syn_baplie("0221E", [
+            ("ABCU1234567", "2200", "CNSHA", "KRPTK", ""),
+            ("ABCU1234568", "4500", "CNNGB", "KRPYOTM", "0100286"),
+        ]))
+        db.calls = []
+        au.run(root, cache2, AU_MASTER, db, {}, _quiet, state_path=state)
+        info2 = db.data.get("voyages/DJCT_0221E/info") or {}
+        check("기존 info 는 PATCH 로만 — 사람 값 불변, 빈 voy_l 만 채움",
+              info2.get("createdBy") == "김성일" and info2.get("berth") == "1번"
+              and info2.get("voy_l") == "0222W" and "autoRegistered" not in info2
+              and not [c for c in db.writes("PUT") if c[1].endswith("/info")],
+              json.dumps(info2, ensure_ascii=False))
+        after = db.data.get("voyages/DJCT_0221E/discharge/ediContainers") or {}
+        check("좌표 보존 — 새 값에 없는 좌표는 기존 노드에서 물려받는다",
+              after["ABCU1234567"].get("pos") == "770284"
+              and after["ABCU1234568"].get("bay") == "10",
+              json.dumps({k: {f: v.get(f) for f in ("bay", "row", "tier", "pos")}
+                          for k, v in after.items()}, ensure_ascii=False))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # (8) 서버가 안 받아 주면 지문을 남기지 않는다 — 다음 사이클에 다시 시도한다
+    tmp2 = tempfile.mkdtemp(prefix="mailpilot_fail_")
+    try:
+        root2 = os.path.join(tmp2, "MB")
+        _mk(root2, "DJCT/0221E/a.edi",
+            _syn_baplie("0221E", [("ABCU1234567", "2200", "CNSHA", "KRPTK", "0100284")]))
+
+        class DeadDB(FakeDB):
+            def put(self, path, obj):                  # 타임아웃·인증 실패 → FirebaseREST 는 None 을 준다
+                self.calls.append(("PUT", self._p(path), obj))
+                return None
+
+        dead = DeadDB()
+        st2 = os.path.join(tmp2, "u.json")
+        r1 = au.run(root2, {"names": {}, "codes": {}}, AU_MASTER, dead, {}, _quiet, state_path=st2)
+        r2 = au.run(root2, {"names": {}, "codes": {}}, AU_MASTER, dead, {}, _quiet, state_path=st2)
+        check("업로드 실패는 지문을 남기지 않는다(조용한 실패 금지 · 다음 사이클 재시도)",
+              r1["errors"] == 1 and r2["changed"] == 1 and r2["skipped"] == 0,
+              "1차 오류 %d · 2차 새자료 %d" % (r1["errors"], r2["changed"]))
+    finally:
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+    # (9) 설정·서버가 없으면 조용히 건너뛴다(사이클을 죽이지 않는다)
+    check("파이어베이스 미설정이면 건너뛴다",
+          au.run("/nope", {}, AU_MASTER, core.FirebaseREST({}), {}, _quiet)["folders"] == 0)
+    check("정본표가 비면 아무것도 올리지 않는다",
+          au.run(os.getcwd(), {}, [], FakeDB(), {}, _quiet)["folders"] == 0)
+
+
+# ────────────────────── 22) 0.5 실파일 종단 — 사이클 한 판이 앱을 채운다 ──────────────────────
+
+def test_app_upload_e2e():
+    print("\n[22] 0.5 실파일 종단 — 수집 사이클 → 검수앱 항차·EDI")
+    try:
+        import app_upload as au
+        import edi_parser as ep
+    except Exception as exc:
+        check("모듈 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+    pick = [("DJCT/260719_DJCT-0220E&0221W PTK DEP.TALLY REPORT/DJCT 0221W PTK.edi",
+             "DJCT", "0221W", "loading"),
+            ("ATPR/260709_ATPR 2632W PTK DEP. TALLY REPORT/ATPR 2632W PTK.ASC",
+             "ATPR", "2632W", "loading")]
+    have = [p for p in pick if os.path.exists(os.path.join(SAMPLES_ROOT, p[0].replace("/", os.sep)))]
+    if not have:
+        print("  [i] _tally_samples 원본이 없어 종단 시뮬을 건너뛴다(합성 종단은 [21]에서 확인).")
+        return
+
+    tmp = tempfile.mkdtemp(prefix="mailpilot_e2e_")
+    try:
+        root = os.path.join(tmp, "MB")
+        want = {}
+        for rel, code, voy, mode in have:
+            src = os.path.join(SAMPLES_ROOT, rel.replace("/", os.sep))
+            dst = os.path.join(root, code, voy, os.path.basename(src))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+            with open(dst, "rb") as fh:
+                text = fh.read().decode("latin1", "replace")
+            cons = ep.parse_edi(text, os.path.basename(dst))["containers"]
+            edi = au.build_edi_map(cons, mode, None)
+            kept, _drop = au.direction_filter(edi, mode, None)
+            want["%s_%s" % (code, voy)] = (mode, len(kept), os.path.basename(dst))
+
+        FakeIMAP.MESSAGES = []
+        db = FakeDB()
+        cfg = {"provider": "custom", "protocol": "imap", "host": "imap.test.local", "port": 993,
+               "ssl": True, "email": "u@test", "password": "pw", "mailbox_root": root,
+               "collect_days": 7, "poll_minutes": 7, "firebase": {}}
+        col = core.Collector(cfg, imap_factory=FakeIMAP, firebase=db,
+                             cache_path=os.path.join(tmp, "vessels_cache.json"),
+                             log_dir=os.path.join(tmp, "logs"),
+                             upload_state_path=os.path.join(tmp, "upload_state.json"))
+        col.master = AU_MASTER
+        col._migrated = True                          # 이관은 [18]에서 따로 본다
+        summary = col.run_cycle()
+
+        check("사이클이 항차를 등록했다",
+              sorted(summary.get("appVoyages") or []) == sorted(want.keys()),
+              "등록 %s" % sorted(summary.get("appVoyages") or []))
+        ok_counts, detail = True, []
+        for key, (mode, count, fname) in want.items():
+            got = db.data.get("voyages/%s/%s/ediContainers" % (key, mode)) or {}
+            raw = db.data.get("voyages/%s/%s/raw/edi" % (key, mode)) or {}
+            detail.append("%s %s %d/%d" % (key, mode, len(got), count))
+            if len(got) != count or count == 0 or raw.get("fileName") != fname:
+                ok_counts = False
+        check("실파일 컨 수가 파서 결과(방향필터 뒤)와 같다", ok_counts, " · ".join(detail))
+        check("info 가 홈 화면 계약을 지킨다",
+              all((db.data.get("voyages/%s/info" % k) or {}).get("autoRegistered") is True
+                  and isinstance((db.data.get("voyages/%s/info" % k) or {}).get("createdAt"), int)
+                  for k in want))
+
+        db.calls = []
+        col.run_cycle()
+        check("두 번째 사이클은 재업로드하지 않는다(지문 멱등)",
+              not [c for c in db.writes("PUT") if "/voyages/" in "/" + c[1]],
+              "쓰기 %d건" % len(db.writes("PUT")))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ────────────────────── 23) 0.5 하트비트 — 앱 health.js 가 읽는 모양 ──────────────────────
+
+def test_heartbeat_shape():
+    print("\n[23] 0.5 하트비트 — at(ms 숫자) · cycleMin")
+    calls = []
+    original = core.http_request
+
+    def fake_http(url, method="GET", payload=None, timeout=core.HTTP_TIMEOUT):
+        calls.append({"url": url, "method": method, "payload": payload})
+        if "identitytoolkit" in url:
+            return {"idToken": "T", "localId": "a", "expiresIn": "3600"}
+        return {"ok": True}
+
+    core.http_request = fake_http
+    try:
+        fb = core.FirebaseREST({"apiKey": "K", "databaseURL": "https://d.firebaseio.com"})
+        fb.cycle_min = 7
+        fb.heartbeat(1, 2, 3)
+    finally:
+        core.http_request = original
+    hb = [c for c in calls if "collector_heartbeat" in c["url"]]
+    body = hb[0]["payload"] if hb else {}
+    now_ms = int(time.time() * 1000)
+    check("at 은 ms 숫자(앱이 뺄셈한다)",
+          isinstance(body.get("at"), int) and abs(now_ms - body["at"]) < 60000,
+          repr(body.get("at")))
+    check("cycleMin 은 설정한 수집 주기", body.get("cycleMin") == 7)
+    check("version 은 코어 버전", body.get("version") == core.VERSION)
+    cfg = {"poll_minutes": 13, "mailbox_root": tempfile.gettempdir(), "firebase": {}}
+    col = core.Collector(cfg, firebase=core.FirebaseREST({}))
+    check("Collector 가 수집 주기를 하트비트에 실어 준다", col.firebase.cycle_min == 13)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -1621,8 +2337,12 @@ def main():
     test_master_read()
     test_migrate_master()
     test_gui_master()
+    test_edi_parser()
+    test_app_upload()
+    test_app_upload_e2e()
+    test_heartbeat_shape()
 
-    failed = [name for name, ok, _d in RESULTS if not ok]
+    failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)
     print("결과: %d개 중 %d개 PASS" % (len(RESULTS), len(RESULTS) - len(failed)))
     if failed:

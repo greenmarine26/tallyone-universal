@@ -1,5 +1,5 @@
 @echo off
-REM MailPilot Uni 0.4 - launcher (finds python, runs the setup GUI, auto-starts collection)
+REM MailPilot Uni 0.5 - launcher (finds python, runs the setup GUI, auto-starts collection)
 setlocal
 cd /d "%~dp0"
 set PY=

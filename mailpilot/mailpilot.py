@@ -1,4 +1,4 @@
-# 메일파일럿 Uni 0.4 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 판독 → 폴더 적재 → 파이어베이스 등록)
+# 메일파일럿 Uni 0.5 — 범용 메일 수집기 코어(IMAP·POP3 → 선박·항차 판독 → 폴더 적재 → 파이어베이스 등록 → 앱 채우기)
 # ⚠ 보안: config.json 에 메일 비밀번호가 평문으로 저장된다. 개인 PC 전용이며 공용 PC에서 쓰지 않는다.
 #   (MVP 한계 — 다음 판에서 암호화 예정. config.json 은 절대 커밋하지 않는다.)
 """메일파일럿 Uni — 사전(선박 목록) 없이 메일에서 선박·항차를 스스로 읽어내는 범용 수집기.
@@ -41,13 +41,16 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-VERSION = "MailPilot Uni 0.4"
+import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
+
+VERSION = "MailPilot Uni 0.5"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 CACHE_PATH = os.path.join(HERE, "vessels_cache.json")
 MASTER_PATH = os.path.join(HERE, "vessels_master.json")   # 선박 정본표(테넌트 데이터 — 커밋하지 않는다)
 UIDL_CACHE_PATH = os.path.join(HERE, "pop_uidl_cache.json")
+UPLOAD_STATE_PATH = os.path.join(HERE, "upload_state.json")   # 앱에 올린 폴더 지문(커밋하지 않는다)
 LOG_DIR = os.path.join(HERE, "logs")
 
 HTTP_TIMEOUT = 15          # 초 — 모든 네트워크 요청 공통(조용한 실패 금지)
@@ -1037,6 +1040,7 @@ class FirebaseREST:
         self.id_token = None
         self.token_at = 0.0
         self.token_ttl = 3300                        # 55분(만료 3600초 전에 갱신)
+        self.cycle_min = 0                           # 수집 주기(분) — 하트비트에 실어 앱이 '끊김'을 판정한다
 
     @property
     def enabled(self):
@@ -1119,8 +1123,14 @@ class FirebaseREST:
         return self.patch("vessels/%s" % code, body)
 
     def heartbeat(self, cycle_mails, cycle_files, cycle_skipped):
+        """collector_heartbeat — 검수앱 src/health.js 가 읽는 모양 그대로.
+
+        at 은 **밀리초 숫자**(앱이 `now - hb.at` 로 뺄셈한다 — 문자열이면 '수집기 없음'으로 뜬다),
+        cycleMin 은 수집 주기(분). 앱은 주기×2 를 넘으면 '끊김'으로 본다.
+        """
         return self.put("collector_heartbeat", {
-            "at": _now_iso(), "version": VERSION,
+            "at": int(time.time() * 1000), "cycleMin": max(1, int(self.cycle_min or 10)),
+            "version": VERSION,
             "cycleMails": cycle_mails, "cycleFiles": cycle_files,
             "cycleSkipped": cycle_skipped,
         })
@@ -1304,12 +1314,13 @@ class Collector:
 
     def __init__(self, cfg, imap_factory=None, firebase=None,
                  cache_path=None, log_dir=None, pop_factory=None, uidl_cache_path=None,
-                 master_path=None):
+                 master_path=None, upload_state_path=None):
         self.cfg = cfg or {}
         self.imap_factory = imap_factory
         self.pop_factory = pop_factory
         self.cache_path = cache_path or CACHE_PATH
         self.uidl_cache_path = uidl_cache_path or UIDL_CACHE_PATH
+        self.upload_state_path = upload_state_path or UPLOAD_STATE_PATH
         self.master_path = master_path or MASTER_PATH
         self.log_dir = log_dir or LOG_DIR
         self.cache = load_cache(self.cache_path)
@@ -1317,6 +1328,10 @@ class Collector:
         self._migrated = False                       # 기동 후 첫 사이클 직전에 한 번만 이관
         self.uidl_cache = load_uidl_cache(self.uidl_cache_path)
         self.firebase = firebase if firebase is not None else FirebaseREST(self.cfg.get("firebase"))
+        try:
+            self.firebase.cycle_min = max(1, int(self.cfg.get("poll_minutes") or 10))
+        except (TypeError, ValueError):
+            self.firebase.cycle_min = 10
         self._stop = threading.Event()
         self._thread = None
         self.last_summary = None
@@ -1362,9 +1377,27 @@ class Collector:
         log("사이클 완료 — 메일 %d · 저장 %d · 스킵 %d · 미분류 %d · 오류 %d"
             % (summary["mails"], summary["files"], summary["skipped"],
                summary["unclassified"], summary["errors"]), self.log_dir)
+        self._fill_app(root, summary)                # 0.5 — 쌓인 자료를 검수앱에 채운다
+        save_cache(self.cache, self.cache_path)      # 짝(E/W) 증거가 캐시에 늘었을 수 있다
         self._report(summary)
         self.last_summary = summary
         return summary
+
+    # ── 앱 채우기(0.5) ──
+    def _fill_app(self, root, summary):
+        """메일박스를 훑어 항차·EDI 를 검수앱 파이어베이스에 올린다. 실패해도 사이클은 살린다."""
+        try:
+            result = app_upload.run(root, self.cache, self.master, self.firebase, self.cfg,
+                                    lambda msg: log(msg, self.log_dir),
+                                    state_path=self.upload_state_path)
+        except Exception as exc:
+            log("앱 채우기 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc), self.log_dir)
+            summary["errors"] += 1
+            return None
+        summary["appVoyages"] = list(result.get("registered") or [])
+        summary["appUploads"] = result.get("uploads", 0)
+        summary["errors"] += result.get("errors", 0)
+        return result
 
     # ── IMAP 경로 ──
     def _cycle_imap(self, root, summary):
@@ -1474,6 +1507,12 @@ class Collector:
         names = [n for n, _ in attachments]
         target = read_mail_target(subject, names, self.cache, self.master)
         if target["ok"]:
+            # 0.5 — 짝(E/W) 증거는 제목·첨부명에 적혀 있을 때만 모은다(추론 금지).
+            fresh = app_upload.collect_pairs(" ".join([subject or ""] + names),
+                                             target["code"], self.cache,
+                                             context_voy=target["voyage"])
+            for dis, load in fresh:
+                log("짝 확인: %s %s ↔ %s" % (target["code"], dis, load), self.log_dir)
             if tally_enabled(self.cache, target["code"]):
                 subdirs = [target["code"], target["voyage"]]
                 log("판독: %s → 선박 %s(%s) · 항차 %s [%s]"
