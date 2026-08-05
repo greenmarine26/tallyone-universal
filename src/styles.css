@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; margin: 0; }
+body { background: #0f172a; color: #e5e7eb; font-family: system-ui, -apple-system, sans-serif; }
+* { box-sizing: border-box; }
+
+/* 베이 박스 (시뮬레이션 + 카고플랜 공용) */
+.bay-box { border: 1px solid #000; background: #fff; color: #000; display: flex; flex-direction: column; }
+.bay-title { text-align: center; font-weight: bold; font-size: 12px; padding: 2px 4px; background: #f5f5f5; border-bottom: 0.5px solid #ccc; flex-shrink: 0; }
+.bay-section { display: flex; flex-direction: column; padding: 2px; flex: 1 1 0; min-height: 0; }
+.bay-area { display: flex; flex-direction: column; width: 100%; }
+.bay-deck { flex: 6 1 0; }
+.bay-hold { flex: 4 1 0; }
+.bay-grid-wrap { display: flex; align-items: stretch; gap: 2px; flex: 1 1 0; min-height: 0; }
+.bay-grid { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; }
+.bay-tier-row { display: flex; gap: 0; flex: 1 1 0; min-height: 0; }
+.bay-tier-row.invisible { visibility: hidden; }
+.bay-cell { flex: 1 1 0; min-width: 0; border: 0.5px solid #888; box-sizing: border-box; background: #fff; font-size: 9px; display: flex; align-items: center; justify-content: center; line-height: 1; }
+.bay-cell.empty { background: transparent; border: none; }
+.bay-tier-labels { display: flex; flex-direction: column; width: 18px; font-size: 9px; color: #555; justify-content: stretch; }
+.bay-tier-labels > span { flex: 1 1 0; line-height: 1; padding: 1px 2px; text-align: right; }
+.bay-tier-labels > span.invisible { visibility: hidden; }
+.bay-row-labels { display: flex; font-size: 9px; color: #555; margin: 0 0 0 0; padding: 0 18px 0 0; }
+.bay-row-labels > span { flex: 1 1 0; min-width: 0; text-align: center; line-height: 1.2; }
+.bay-deck-hold-divider { height: 0; border-top: 1.5px solid #000; margin: 1px 18px 1px 0; }
+
+/* 검수앱 호환 마크 색 */
+.cell-o { color: #000; }
+.cell-X { color: #000; background: #f0f0f0; }
+.cell-shadow { background: #d4d4d8; color: transparent; }

@@ -1,0 +1,8 @@
+node_modules/
+dist-planedit/
+dist-apptest/
+.vite/
+index.html.production.bak
+_t*.mjs
+_render*.mjs
+*.log

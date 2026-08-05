@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* M3.86: Pull-to-Refresh 차단 - 화면 스크롤 중 페이지 새로고침 트리거 방지
+     "화면 내리다 보면 리프레쉬 되어서 재접" 증상 해결 */
+  html, body {
+    overscroll-behavior-y: contain;
+  }
+  body {
+    @apply bg-slate-950 text-slate-100;
+  }
+}
+
+.mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
