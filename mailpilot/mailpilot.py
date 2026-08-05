@@ -32,6 +32,7 @@ import os
 import poplib
 import re
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -156,6 +157,28 @@ def add_log_listener(fn):
     _log_listeners.append(fn)
 
 
+def _safe_print(text):
+    """콘솔·파일이 못 쓰는 글자가 섞여도 프로그램이 죽지 않게 찍는다.
+
+    화면(콘솔)은 유니코드를 그대로 받지만, 출력이 파일·파이프로 넘어가면 인코딩이 cp949 라
+    '—'(U+2014) 같은 글자에서 UnicodeEncodeError 가 난다. 무인 실행에서 로그 한 줄 때문에
+    수집기가 통째로 죽는 일을 막는다 — 못 쓰는 글자만 바꿔 찍고 계속 간다.
+    (이 함수가 실패해도 같은 줄이 logs/YYYYMMDD.txt 에는 이미 적혀 있다.)
+    """
+    try:
+        print(text)
+        return True
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        try:
+            print(text.encode(enc, "replace").decode(enc, "replace"))
+        except Exception:
+            pass
+        return False
+    except (ValueError, OSError):                    # stdout 이 닫혔거나 쓸 수 없는 경우
+        return False
+
+
 def log(msg, log_dir=None):
     """한국어 로그 한 줄 — 화면과 logs/YYYYMMDD.txt 양쪽에 남긴다."""
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -168,8 +191,8 @@ def log(msg, log_dir=None):
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except OSError as exc:                       # 로그 실패해도 수집은 계속
-            print("로그 기록 실패: %s" % exc)
-        print(line)
+            _safe_print("로그 기록 실패: %s" % exc)
+        _safe_print(line)
     for fn in list(_log_listeners):
         try:
             fn(line)

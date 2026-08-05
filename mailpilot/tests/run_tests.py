@@ -17,6 +17,7 @@
  13) 폴더 정리 — 항차를 다 옮긴 빈 코드 폴더 치우기(파일 삭제 없음 · 멱등)
  14) GUI — 수집 중 [폴더 정리] 잠금 · --autostart 무인 시작(설정 불완전이면 시작 안 함)
  15) 버전 라벨 — README·run_mailpilot.bat 이 core.VERSION 과 같은지, --autostart 전달
+ 16) 로그 출력 안전 — cp949 파일/파이프 출력에서도 UnicodeEncodeError 로 죽지 않는다
 """
 
 import datetime
@@ -1276,6 +1277,38 @@ def test_version_labels():
           "0.2" not in readme and "0.2" not in bat)
 
 
+# ────────────────────── 16) 로그 출력이 프로그램을 죽이지 않는다 ──────────────────────
+
+def test_log_encoding_safety():
+    print("\n[16] 로그 — cp949 로 못 쓰는 글자('—')가 있어도 죽지 않는다(무인 실행 보호)")
+    tmp = tempfile.mkdtemp(prefix="mailpilot_log_")
+    real_stdout = sys.stdout
+    sink = io.TextIOWrapper(io.BytesIO(), encoding="cp949", newline="")   # 파일·파이프 출력 재현
+    try:
+        message = "수집을 시작합니다 — 버전 %s · 무인" % core.VERSION
+        sys.stdout = sink
+        try:
+            line = core.log(message, tmp)
+        finally:
+            sys.stdout = real_stdout
+        sink.flush()
+        printed = sink.buffer.getvalue().decode("cp949", "replace")
+        path = os.path.join(tmp, datetime.datetime.now().strftime("%Y%m%d") + ".txt")
+        with open(path, "r", encoding="utf-8") as fh:
+            saved = fh.read()
+        check("cp949 출력이라도 예외를 던지지 않는다", line.endswith(message), line[-30:])
+        check("로그 파일에는 원문 그대로 남는다(— 포함)", message in saved)
+        check("화면에는 못 쓰는 글자만 바꿔서 찍는다",
+              "수집을 시작합니다" in printed and len(printed.strip()) > 0,
+              printed.strip()[:50])
+    except Exception as exc:
+        sys.stdout = real_stdout
+        check("로그 인코딩 안전", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        sys.stdout = real_stdout
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -1296,6 +1329,7 @@ def main():
     test_organize_empty_cleanup()
     test_gui_lock_and_autostart()
     test_version_labels()
+    test_log_encoding_safety()
 
     failed = [name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)
