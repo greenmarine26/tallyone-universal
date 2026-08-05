@@ -8,6 +8,7 @@
 // PORT 코드 매핑
 import { openPrintWindow } from './printHelper.js';
 import { formatBerth, isPyeongtaekPort } from './utils.js';
+import { tenant } from './tenant.js';   // TallyUni 0.2: 회사·주소 단일 소스
 const PORT_MAP = {
   // 표준 5자
   // V9.57(G13): 평택 표기 7종(utils.isPyeongtaekPort의 PYEONGTAEK_CODES)과 정합 —
@@ -319,7 +320,7 @@ function generateVoucherHTML(voyage, mode = 'settlement', overrides = {}) {
   }
   const pier = autoPier || 'PCTC';   // 폴백: 평택항 주력 부두
   const berth = berthRaw ? formatBerth(berthRaw) : '-';  // M6.11: E7/W6 단축 양식
-  const port = info.port || 'PYEONGTAEK, KOREA';
+  const port = info.port || tenant().addressEn;   // TallyUni 0.2: 리터럴 → 테넌트 값
 
   // op 등장 set (실제 데이터)
   const presentOps = new Set([...Object.keys(disch), ...Object.keys(load)]);
@@ -438,7 +439,7 @@ table.voucher tr.total-row:first-of-type > td { border-top: 1.5pt solid #000; }
 .signs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 20pt; }
 .signs > div { text-align: center; padding-top: 4pt; font-weight: bold; font-size: 10pt; border-top: 0.5pt solid #000; }
 </style></head><body><div class="content">
-<div class="title">GREEN MARINE CO., LTD.</div>
+<div class="title">${tenant().companyEn}</div>
 <div class="subtitle">FINAL WORKING REPORT (VOUCHER)${mode === 'actual' ? ' — 작업용 (현재 진행)' : ''}</div>
 <div class="info-row">
 <div><b>M/V :</b> ${vesselName}</div>

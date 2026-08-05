@@ -67,7 +67,7 @@ export function buildActualSealListText(meta, rows) {
   lines.push(`${tenant().companyEn}   ${tenant().addressEn}`);
   lines.push('ACTUAL CONTAINER & SEAL NUMBER LIST');
   lines.push(`M/V : ${meta.vsl || ''}    VOY.NO : ${meta.voy || ''}    DATE : ${meta.date || ''}`);
-  lines.push(`PORT : ${meta.port || 'PYEONGTAEK, KOREA'}    MODE : ${meta.mode === 'discharge' ? '양하' : '선적'}`);
+  lines.push(`PORT : ${meta.port || tenant().addressEn}    MODE : ${meta.mode === 'discharge' ? '양하' : '선적'}`);
   lines.push('');
   lines.push('NO | MANIFEST(CONT/SEAL) | SIZE | ACTUAL(CONT/SEAL) | RESEAL | REMARKS');
   lines.push('-'.repeat(78));

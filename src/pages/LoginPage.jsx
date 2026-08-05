@@ -16,7 +16,7 @@ import {
 } from '../adminGuard.js';
 import { fbGetAdminGuard, fbUpdateAdminGuard } from '../firebase.js';
 import { useBackHandler } from '../backHandler.js';
-import { tenant } from '../tenant.js';   // TallyUni 0.1: 회사명 단일 소스
+import { tenant, wizardDone } from '../tenant.js';   // TallyUni 0.1: 회사명 · 0.2: 마법사 완료 여부
 
 export default function LoginPage({ current = '', inspectors, extraStaff = {}, deletedStaff = {}, notice = '', onSelect, onCancel = null }) {
   const [newName, setNewName] = useState('');
@@ -151,8 +151,12 @@ export default function LoginPage({ current = '', inspectors, extraStaff = {}, d
     .toLowerCase();
 
   // 화이트리스트 (코드 명단 + Firebase 동적 명단 - 퇴사자 제외, 소유자는 항상 허용)
+  // TallyUni 0.2: 첫 실행 마법사를 거친 테넌트는 코드에 박힌 그린마린 명단(STAFF_NAMES)을 쓰지 않는다.
+  //   그 테넌트의 직원은 RTDB staffList(=extraStaff)와 소유자뿐 — 마법사가 소유자 1명을 심어 두고,
+  //   나머지는 소유자가 앱 안에서 추가한다. 기본(그린마린) 테넌트는 종전대로 파일 명단이 폴백으로 남는다.
+  const base = wizardDone() ? [] : STAFF_NAMES;
   const extraNames = Object.values(extraStaff || {}).map(s => s.name).filter(Boolean);
-  const allWhitelist = [...new Set([...STAFF_NAMES, ...extraNames].filter(n => !deletedStaff[n] || isOwnerName(n)).concat(OWNER_NAME))];
+  const allWhitelist = [...new Set([...base, ...extraNames].filter(n => !deletedStaff[n] || isOwnerName(n)).concat(OWNER_NAME))];
   const isAllowed = (name) => allWhitelist.some(n => normalizeName(n) === normalizeName(name));
 
   // 직접 입력 — 검증 통과 시 선택 상태로 (로그인 버튼으로 확정)
@@ -190,8 +194,8 @@ export default function LoginPage({ current = '', inspectors, extraStaff = {}, d
           <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-800 to-blue-950 border border-blue-600/50 flex items-center justify-center shadow-lg shadow-blue-950/60 mb-3">
             <Anchor className="w-9 h-9 text-blue-300"/>
           </div>
-          <h1 className="text-3xl font-black tracking-tight text-blue-100">TallyOne</h1>
-          <div className="text-[12px] text-slate-400 mt-1">평택항 컨테이너 검수</div>
+          <h1 className="text-3xl font-black tracking-tight text-blue-100">{tenant().appTitle}</h1>
+          <div className="text-[12px] text-slate-400 mt-1">{tenant().homePortName}항 컨테이너 검수</div>
         </div>
 
         {/* V9.13 계승: 자동 로그아웃 안내 */}

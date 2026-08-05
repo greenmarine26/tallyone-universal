@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
-import { tenant, TENANT_DEFAULTS } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.1';   // 범용판 1판 — 테넌트 설정 단일화(tenant.js)
+import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
+export const APP_VERSION = 'TallyUni 0.2';   // 2판 — Firebase 런타임화 + 첫 실행 마법사 + 직원 부트스트랩
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가
@@ -341,6 +341,11 @@ export const SK = {
   //   검수원이 폰에서 직접 입력 → 노출 차단되어도 5초 내 본인이 새 키 입력해서 복구.
   geminiKey: 'master_gemini_api_key_v1',
   geminiKeyLast6: 'master_gemini_api_key_last6_v1',   // 확인용 마지막 6자리 (UI 표시)
+  // TallyUni 0.2: 첫 실행 마법사가 저장하는 테넌트 설정 2종.
+  //   실제 키 문자열은 tenant.js(TENANT_SK)가 단일 소스 — tenant.js는 utils를 import할 수 없어(순환)
+  //   localStorage를 직접 읽기 때문이다. 여기서는 그 값을 그대로 참조만 한다.
+  fbCfg: TENANT_SK.fbCfg,           // Firebase 접속 설정(JSON)
+  tenantCfg: TENANT_SK.tenantCfg,   // 회사·모항·소유자·로고(JSON)
 };
 
 // === Helpers ===
@@ -2691,10 +2696,17 @@ export function parsePortMisDateTime(s) {
   return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime();
 }
 
-// V8.09-11: PORT-MIS 항명이 평택인지 (빈 값/평택/PYEONGTAEK = 평택).
+// V8.09-11: PORT-MIS 항명이 모항인지 (빈 값/모항명 = 모항).
+// TallyUni 0.2: 항명을 tenant().homePortName에서 가져온다. 기본 테넌트(평택)면 기존 정규식
+//   /평택|PYEONGTAEK/i 그대로 — 동작 완전 보존(isPyeongtaekPort와 같은 수법). 함수명·시그니처 불변.
 export function isPyeongtaekPortName(port) {
   const s = String(port || '').trim();
-  return !s || /평택|PYEONGTAEK/i.test(s);
+  if (!s) return true;
+  const T = tenant();
+  if (T.homePortName === TENANT_DEFAULTS.homePortName) return /평택|PYEONGTAEK/i.test(s);
+  const esc = String(T.homePortName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!esc) return false;
+  return new RegExp(esc, 'i').test(s);
 }
 
 // V8.09-11: 선박 현재 상태 판정 (ETA/ETD vs 현재시각 + 입출 보조).

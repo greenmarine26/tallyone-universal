@@ -7,8 +7,10 @@ import {
   fbSubscribeVoyages, fbSubscribeInspectors, fbSetInspector,
   fbSubscribeConnection, fbSetInspectorActivity, fbLogoutInspector, fbSubscribePortMis, fbSubscribePilotForecast, fbSubscribeTerminalWork,
   fbSubscribeStaffList, fbSubscribeDeletedStaff, fbSubscribeShipBayDict, fbSubscribeHeartbeat,
-  fbSubscribeMatrixEditors, fbGetAdminGuard, fbReconnect
+  fbSubscribeMatrixEditors, fbGetAdminGuard, fbReconnect, hasFirebase
 } from './firebase.js';
+import { tenant } from './tenant.js';               // TallyUni 0.2: 회사·앱 이름 단일 소스
+import SetupWizard from './pages/SetupWizard.jsx';  // TallyUni 0.2: 첫 실행 마법사(미설정 상태 전용 화면)
 import { isAdminName, isOwnerName } from './adminGuard.js';   // V9.11: 관리자 판정 + TallyOne 1.0: 소유자 판정(라우트 게이트)
 import { isChief, setServerRoles } from './staffList.js';     // TallyOne 1.0: 역할 게이트 + 서버 직책 캐시(B-4 선행분 연결)
 import { IDLE_LOGOUT_MS, isIdleLogout } from './inspectorStatus.js';   // V9.13: 30분 무조작 자동 로그아웃
@@ -108,6 +110,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // TallyUni 0.2: Firebase 미설정(첫 실행)이면 구독을 아예 걸지 않는다 — db가 null이라 ref()가 던진다.
+    //   이 상태에서는 아래 렌더 게이트가 SetupWizard만 그린다.
+    if (!hasFirebase()) return;
     const u1 = fbSubscribeVoyages((v) => { setVoyages(v); setVoyagesLoaded(true); });
     const u2 = fbSubscribeInspectors(setInspectors);
     // TallyOne 1.0 (K5): 서버 직책을 staffList 모듈 캐시에 먼저 밀어 넣고(setServerRoles),
@@ -161,6 +166,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // TallyUni 0.2: 미설정(첫 실행) 상태에서는 조회하지 않는다 — db=null이라 조회가 실패하며
+    //   콘솔에 오류만 남긴다(마법사 화면에서 무의미). 게이트를 구독 useEffect와 같은 조건으로 맞춘다.
+    if (!hasFirebase()) return;
     let alive = true;
     fbGetAdminGuard().then(g => { if (alive) setAdminGuard(g); }).catch(() => {});
     return () => { alive = false; };
@@ -185,6 +193,12 @@ export default function App() {
   }, [bayDictSyncPending]);
 
   // TallyOne 1.0 (B-12): 해시 → 라우트 동기화는 parseHash 단일 파서만 쓴다
+  // TallyUni 0.2: 브라우저 탭 제목도 테넌트 값으로 (기본 테넌트면 "TallyOne — 평택항 검수").
+  useEffect(() => {
+    const T = tenant();
+    document.title = `${T.appTitle} — ${T.homePortName}항 검수`;
+  }, []);
+
   useEffect(() => {
     const sync = () => setRoute(parseHash(window.location.hash));
     window.addEventListener('hashchange', sync);
@@ -356,6 +370,10 @@ export default function App() {
     else if (target.voyageKey) window.location.hash = `#/voyage/${encodeURIComponent(target.voyageKey)}${target.mode ? `/${target.mode}` : ''}`;
   }, []);
 
+  // ── TallyUni 0.2: 첫 실행 게이트 — Firebase 설정이 없으면 마법사만 그린다. ──
+  //   로그인·라우팅·구독 전부 건너뛴다(구독 useEffect도 같은 조건으로 조기 return).
+  if (!hasFirebase()) return <SetupWizard />;
+
   // ── TallyOne 1.0: 로그인 게이트 — 로그인 전에는 어떤 라우트도 렌더하지 않는다. ──
   //   로그인 상태에서 #/login에 오면 검수원 변경 화면(돌아가기 버튼 제공).
   if (!inspector || route.name === 'login') {
@@ -381,7 +399,7 @@ export default function App() {
           />
         )}
         <footer className="text-center text-[11px] text-slate-600 pb-8 pt-2 leading-relaxed">
-          © 2026 (주)그린마린(Green Marine) · 개발 연지아빠 · 저작권은 개발자 연지아빠에게 있습니다<br/>
+          © 2026 {tenant().company} · 개발 연지아빠 · 저작권은 개발자 연지아빠에게 있습니다<br/>
           <span className="opacity-70">{APP_VERSION}</span>
         </footer>
       </div>
@@ -505,7 +523,7 @@ export default function App() {
       </main>
 
       <footer className="text-center text-[11px] text-slate-600 pb-24 pt-4 leading-relaxed">
-        © 2026 (주)그린마린(Green Marine) · 개발 연지아빠 · 저작권은 개발자 연지아빠에게 있습니다<br/>
+        © 2026 {tenant().company} · 개발 연지아빠 · 저작권은 개발자 연지아빠에게 있습니다<br/>
         <span className="opacity-70">{APP_VERSION}</span>
       </footer>
 

@@ -9,8 +9,10 @@
 // 명단 로딩 전/오프라인 폴백: 시드 관리자(김성일)만 허용.
 
 import { SK, _storage } from './utils.js';
+import { tenant } from './tenant.js';   // TallyUni 0.2: 시드 관리자 = 테넌트 소유자
 
-const SEED_ADMIN = '김성일';
+// TallyUni 0.2: 리터럴 → 테넌트 값(기본 김성일이라 그린마린 동작 불변).
+const SEED_ADMIN = tenant().owner;
 
 /** 현재 선택된 검수원 이름 */
 export function getActiveInspector() {

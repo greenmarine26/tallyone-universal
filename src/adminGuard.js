@@ -6,8 +6,13 @@
 // 세션 허용: 비신뢰 기기에서 비밀번호 통과 시 sessionStorage 'gm_admin_session_ok' (탭 닫으면 소멸)
 
 import { isChief } from './staffList.js';
+import { tenant } from './tenant.js';        // TallyUni 0.2: 소유자 이름은 테넌트 설정에서
 
-export const OWNER_NAME = '김성일';          // V9.10: 소유자(개발·운영자) — 권한 회수 불가, 퇴사해도 유지
+/** TallyUni 0.2: 앱 소유자 이름 (기본 테넌트=김성일, 마법사 테넌트=최초 관리자). */
+export function ownerName() { return tenant().owner; }
+// V9.10: 소유자(개발·운영자) — 권한 회수 불가, 퇴사해도 유지.
+//   TallyUni 0.2: 리터럴 → 테넌트 값. 모듈 로드 시점에 확정된다(마법사는 저장 후 location.reload 하므로 항상 최신).
+export const OWNER_NAME = ownerName();
 export const ADMIN_NAME = OWNER_NAME;        // 하위호환 별칭 (기존 호출부 유지)
 export const MAX_TRUSTED_DEVICES = 3;
 const DEVICE_KEY = 'gm_admin_device_id_v1';

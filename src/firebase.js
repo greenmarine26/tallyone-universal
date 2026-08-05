@@ -1,5 +1,5 @@
 // Firebase Realtime Database — Master V1
-// 프로젝트: greenmarinetally (asia-southeast1)
+// TallyUni 0.2: 접속 프로젝트는 첫 실행 마법사가 정한다(하드코딩 없음).
 import { initializeApp } from 'firebase/app';
 import {
   getDatabase, ref, onValue, push, set, update, remove, get, child, off, goOffline, goOnline
@@ -11,20 +11,23 @@ import {
 } from 'firebase/storage';
 import { isPyeongtaekPort, isPortCode, resolveShipKey } from './utils.js';
 import { activityDayKey, pickExpiredActivityBuckets } from './activityLog.js';   // TallyOne 1.3: 활동 로그 버킷 키(단일 소스)
+import { getFirebaseConfig, tenant } from './tenant.js';   // TallyUni 0.2: Firebase 설정·소유자는 런타임(첫 실행 마법사)에서 온다
 
-const firebaseConfig = {
-  apiKey: "AIzaSyBE4lC78w6jl8uVELrj1Jjsl7AVkvVVQBY",
-  authDomain: "greenmarinetally.firebaseapp.com",
-  databaseURL: "https://greenmarinetally-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "greenmarinetally",
-  storageBucket: "greenmarinetally.firebasestorage.app",
-  messagingSenderId: "981192728666",
-  appId: "1:981192728666:web:c74f0e1a26c1f91039b863"
-};
+// TallyUni 0.2: 하드코딩 config 제거 — 접속 정보는 마법사가 localStorage에 저장한 것을 읽는다.
+//   설정이 없으면 초기화 자체를 하지 않는다(db=null). App이 hasFirebase()로 막고 마법사를 띄운다.
+//   ⚠ `export { db }`는 let의 라이브 바인딩이라 소비 파일(4곳)은 무수정으로 그대로 동작한다.
+const _cfg = getFirebaseConfig();
+let app = null;
+let db = null;
+let storage = null;
+if (_cfg && _cfg.databaseURL) {
+  app = initializeApp(_cfg);
+  db = getDatabase(app);
+  storage = getStorage(app);  // M6.40
+}
 
-const app = initializeApp(firebaseConfig);
-const db = getDatabase(app);
-const storage = getStorage(app);  // M6.40
+/** TallyUni 0.2: Firebase가 실제로 초기화됐는가 (= 첫 실행 마법사를 마쳤는가). */
+export const hasFirebase = () => !!db;
 
 // === M6.40: STOWAGE PDF 보관 ===
 // V9.57(G14): 참조 0인 죽은 export 삭제 — fbCleanupExpiredStowagePdfs·fbDeleteStowagePdf
@@ -1240,7 +1243,10 @@ export async function fbRestoreVoyageFromArchive(voyageKey) {
 //   REST 실패 시 기존 전체 읽기로 폴백 + console.warn.
 export async function fbListArchive() {
   try {
-    const res = await fetch(`${firebaseConfig.databaseURL}/archive.json?shallow=true`);
+    // TallyUni 0.2: databaseURL은 런타임 설정에서 — 미설정이면 REST 경로 자체가 성립하지 않는다.
+    const dbUrl = getFirebaseConfig()?.databaseURL;
+    if (!dbUrl) return [];
+    const res = await fetch(`${dbUrl}/archive.json?shallow=true`);
     if (!res.ok) throw new Error(`shallow HTTP ${res.status}`);
     const keys = Object.keys((await res.json()) || {});
     const out = await Promise.all(keys.map(async (key) => {
@@ -1971,7 +1977,8 @@ export async function fbBatchSaveShipBayDict(entries) {
 //   규칙: 명단에 있는 사람만 매트릭스 빌더 저장 + 명단 수정 가능
 //   초기 권한자: 김성일 (명단이 비어있을 때 자동 시딩)
 const MATRIX_EDITORS_NODE = 'matrix_editors';
-const MATRIX_EDITORS_SEED = ['김성일'];
+// TallyUni 0.2: 시드 권한자 = 테넌트 소유자(기본 김성일). 마법사가 정한 최초 관리자가 그대로 시드가 된다.
+const MATRIX_EDITORS_SEED = [tenant().owner];
 
 /**
  * 권한자 명단 조회 (1회성). 명단이 없으면 김성일로 시딩 후 반환.
@@ -2294,7 +2301,10 @@ export async function fbGetActivityDays(days = 7) {
 //   소유자 화면(활동 로그 섹션) 진입 시 1회 호출. 실패 무해 — console.warn 1줄만 남긴다.
 export async function fbCleanupActivityLog(keepDays = 30) {
   try {
-    const res = await fetch(`${firebaseConfig.databaseURL}/activity_log.json?shallow=true`);
+    // TallyUni 0.2: databaseURL은 런타임 설정에서 — 미설정이면 정리할 것도 없다.
+    const dbUrl = getFirebaseConfig()?.databaseURL;
+    if (!dbUrl) return 0;
+    const res = await fetch(`${dbUrl}/activity_log.json?shallow=true`);
     if (!res.ok) throw new Error(`shallow HTTP ${res.status}`);
     const keys = Object.keys((await res.json()) || {});
     const expired = pickExpiredActivityBuckets(keys, keepDays, Date.now());

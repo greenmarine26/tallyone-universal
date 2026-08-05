@@ -156,7 +156,7 @@ export default function PortMisCaptureModal({ onClose }) {
             <div>
               <p className="text-slate-300 text-sm mb-3">
                 PORT-MIS에서 <strong className="text-amber-300">엑셀 다운로드</strong> 또는 <strong className="text-cyan-300">화면 캡처</strong>를 올려주세요.
-                자동으로 호출부호/선박명/입출항/<b className="text-emerald-300">부두(PCTC/PNCT)</b>를 추출해 모든 검수원과 공유합니다.
+                자동으로 호출부호/선박명/입출항/<b className="text-emerald-300">부두({tenant().terminals.map(t => t.name).join('/')})</b>를 추출해 모든 검수원과 공유합니다.
               </p>
               {error && (
                 <div className="bg-red-950/50 border border-red-700 rounded p-3 mb-3 text-red-300 text-sm flex gap-2">
