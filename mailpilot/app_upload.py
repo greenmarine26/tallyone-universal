@@ -27,7 +27,7 @@ import berth_schedule as bsch                       # 0.6 — 터미널 선석�
 import edi_parser as ep
 
 STATE_V = 1                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
-PARSER_TAG = "MailPilot Uni 0.6-01 (edi_parser)"
+PARSER_TAG = "MailPilot Uni 0.6-02 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
 # 홈포트(모항) 판정 — 검수앱 src/utils.js 의 PYEONGTAEK_CODES / PYEONGTAEK_SUFFIX 와 같은 기준.
@@ -979,6 +979,21 @@ class BerthPlan:
                     return row
         return None
 
+    def excluded_route_for(self, code):
+        """이 선박이 **배정표에서 확인된** 비관할 항로 선박인가 → 항로명. 아니면 ''.
+
+        0.6-02 — 비관할 항로(PXS·PQS·JWKP)는 검수사가 아예 맡지 않는 배다. 그런데 항차 단위로만
+        보면 배정표 창(뒤 7일~앞 7일) 밖으로 밀린 지난 항차(PCSG 2639E·2640W)는 줄을 못 찾아
+        fail-open 으로 남고, 지워도 다음 사이클에 다시 등록된다.
+        **배정표에 실린 이 선박의 줄이 하나도 빠짐없이 비관할일 때만** 선박 단위로 판정한다.
+        한 줄이라도 관할 항로면 '' — 항로가 바뀐 배를 통째로 지우지 않는다(추측 금지).
+        """
+        rows = self.rows_for(code)
+        if not rows or not all(row.get("excluded") for row in rows):
+            return ""
+        routes = sorted({str(row.get("route") or "").upper() for row in rows if row.get("route")})
+        return "·".join(routes) or "?"
+
 
 # ── 기항 마감(DEP.TALLY) 캐시 — vessels_cache.json 안 "closed": {선박코드: {항차: 시각}} ──
 
@@ -1062,6 +1077,11 @@ def registration_gate(plan, cache, code, voys):
         return True, ""
     row = plan.find(code, voys)
     if row is None:
+        # 0.6-02 — 줄은 못 찾아도 배정표에서 '이 배는 비관할'이 확인되면 새 카드를 안 만든다.
+        #   (정리에서 지운 비관할 키가 다음 사이클에 되살아나는 것을 막는 같은 잣대다.)
+        route = plan.excluded_route_for(code)
+        if route:
+            return False, "비관할 항로 %s(배정표에서 확인한 선박)" % route
         return True, ""                                 # 배정표에 없는 선박 — 종전대로(fail-open)
     if row.get("excluded"):
         return False, "비관할 항로 %s" % (row.get("route") or "?")
@@ -1133,12 +1153,12 @@ def remove_voyage_key(firebase, key, why, log):
     if firebase.get("voyages/%s" % key, params={"shallow": "true"}):
         log("  ✗ 항차 키가 남아 있습니다: voyages/%s" % key)
         return "failed"
-    log("  − 지난 항차 카드 삭제: %s (%s · 폴더·파일은 그대로)" % (key, why))
+    log("  − 항차 카드 삭제: %s (%s · 폴더·파일은 그대로)" % (key, why))
     return "deleted"
 
 
 def reconcile_with_plan(firebase, cache, plan, log):
-    """배정표로 서버 항차를 한 번 맞춘다 — ⓐ갈라진 짝 병합 ⓑ일정 보강 ⓒ지난 항차 카드 제거.
+    """배정표로 서버 항차를 한 번 맞춘다 — ⓐ갈라진 짝 병합 ⓑ일정 보강 ⓒ지난 항차·비관할 카드 제거.
 
     여러 번 돌려도 안전하다(멱등). 실패는 건마다 세고 사이클은 계속한다.
     """
@@ -1183,25 +1203,28 @@ def reconcile_with_plan(firebase, cache, plan, log):
         else:
             out["errors"] += 1
 
-    # ⓒ 지난 항차 카드 제거 — 지울 것을 **먼저 전부 적고** 나서 지운다.
+    # ⓒ 지난 항차·비관할 항로 카드 제거 — 지울 것을 **먼저 전부 적고** 나서 지운다.
     index = voyage_index(firebase, log)
     plan_gone = []
     for code in sorted(index):
+        off_route = plan.excluded_route_for(code)       # 0.6-02 — 배정표로 확인된 비관할 선박
         for voy in sorted(index[code]):
             key = index[code][voy]
             row = plan.find(code, [voy])
             if row is not None and row.get("excluded"):
-                continue                                # 비관할 항로 — 판단을 미룬다
-            if row is not None and row.get("departed"):
+                plan_gone.append((key, "비관할 항로 %s" % (row.get("route") or "?")))
+            elif row is None and off_route:
+                plan_gone.append((key, "비관할 항로 %s(배정표에서 확인한 선박)" % off_route))
+            elif row is not None and row.get("departed"):
                 plan_gone.append((key, "배정표 실적 출항 %s"
                                   % (row.get("atd") or row.get("etd") or "")))
             elif row is None and is_closed(cache, code, [voy]):
                 plan_gone.append((key, "기항 마감(DEP.TALLY) · 배정표 창 밖"))
     if not plan_gone:
-        log("선석배정 정리 — 치울 지난 항차가 없습니다.")
+        log("선석배정 정리 — 치울 지난 항차·비관할 카드가 없습니다.")
         return out
-    log("선석배정 정리 — 지난 항차 카드 %d개를 확인했습니다: %s"
-        % (len(plan_gone), ", ".join(k for k, _w in plan_gone)))
+    log("선석배정 정리 — 치울 카드 %d개를 확인했습니다: %s"
+        % (len(plan_gone), ", ".join("%s(%s)" % (k, w) for k, w in plan_gone)))
     for key, why in plan_gone:
         state = remove_voyage_key(firebase, key, why, log)
         if state == "deleted":

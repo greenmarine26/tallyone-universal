@@ -1416,6 +1416,27 @@ def test_master_read():
     check("서로 다른 정본이 동률이면 매칭 실패(모호 병합 금지)",
           core.match_master("ALPHA BRAVO 2601E LIST", tie) is None)
 
+    # 0.6-02 — 검수사 확인으로 SWAL(SAWASDEE ALTAIR)을 정본표에 넣었다. 같은 SAWASDEE 계열인
+    #   SWAT(ATLANTIC)와 섞이면 안 되고, 자동 코드로 캐시에 있던 배가 정본으로 승격돼야 한다.
+    sawasdee = [{"code": "SWAT", "name": "SAWASDEE ATLANTIC", "aliases": [], "ko": []},
+                {"code": "SWAL", "name": "SAWASDEE ALTAIR", "aliases": [], "ko": []}]
+    check("SAWASDEE 계열 — ALTAIR 는 SWAL · ATLANTIC 은 SWAT(섞이지 않는다)",
+          (core.match_master("SAWASDEE ALTAIR 2601E CLL", sawasdee) or {}).get("code") == "SWAL"
+          and (core.match_master("SAWASDEE ATLANTIC 2601E CLL",
+                                 sawasdee) or {}).get("code") == "SWAT")
+    promoted = {"names": {"SAWASDEE ALTAIR": "SWAL"}, "codes": {"SWAL": "SAWASDEE ALTAIR"}}
+    res_sw = core.migrate_to_master("", promoted, sawasdee)
+    check("SWAL 승격 — 정본표에 있으면 미확인이 아니고 옮길 것도 없다(코드가 이미 정본)",
+          not res_sw["unmatched"] and not res_sw["plan"]
+          and promoted["codes"]["SWAL"] == "SAWASDEE ALTAIR",
+          json.dumps(res_sw, ensure_ascii=False))
+    check("SWAL 승격 — 정본표에 없으면 미확인으로 남는다(승격 전 상태)",
+          core.migrate_to_master("", {"names": {"SAWASDEE ALTAIR": "SWAL"}, "codes": {}},
+                                 [sawasdee[0]])["unmatched"] == [("SAWASDEE ALTAIR", "SWAL")])
+    check("SWAL 승격 — 등록 게이트(정본표에 있는 선박만 올린다)를 통과한다",
+          core.master_by_code(sawasdee, "SWAL") is not None
+          and core.tally_enabled({"tally": {}}, "SWAL"))
+
     # 정본에 걸려도 항차가 없으면 종전대로 미분류
     none_voy = core.read_mail_target("연태훼리 CLL 송부드립니다", [], {"names": {}, "codes": {}},
                                      MASTER_FIXTURE)
@@ -2590,6 +2611,22 @@ def _berth_http(**kw):
 BERTH_CFG = {"berth_plan": True, "excluded_routes": ["PXS", "PQS", "JWKP"]}
 
 
+def _valid_berth(text):
+    """검수앱 src/utils.js isValidBerth 를 그대로 옮긴 잣대 — 수집기가 만든 표기가 통과하는가.
+
+    통과 못 하는 값을 넣으면 앱이 저장된 berth 를 지워 버린다(HomePage 301행).
+    """
+    import re as _re
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if _re.match(r"^[ewEW]\d+$", value):                 # E7/W6 단축형은 두 글자라도 통과
+        return True
+    if _re.match(r"^[A-Z]{3,5}$", value):                # 시설 약어(MBM·BCT) 차단
+        return False
+    return len(value) > 2
+
+
 def test_berth_schedule():
     print("\n[25] 0.6 선석배정 게이트 — 터미널이 항차의 진실")
     try:
@@ -2625,10 +2662,26 @@ def test_berth_schedule():
     check("PNCT — 남/북 항차 NSDC009(2607N/2608S)",
           (by.get("NSDC009") or {}).get("voy_d") == "2607N"
           and (by.get("NSDC009") or {}).get("voy_l") == "2608S")
-    check("PNCT — 선석 번호가 없는 표기(T2)는 berth 를 비우고 원문만 남긴다",
-          obwh.get("berth") == "" and obwh.get("berth_raw") == "T2"
+    # 0.6-02 — 검수사 화면 실측: F1 = 페리 선석 · T1~T3 = 1~3 Berth.
+    check("PNCT — 선석 T2 → 앱 규약 '2번선석'(isValidBerth 통과) · 원문은 그대로",
+          obwh.get("berth") == "2번선석" and obwh.get("berth_raw") == "T2"
           and obwh.get("pier") == "PNCT",
           "%r / %r" % (obwh.get("berth"), obwh.get("berth_raw")))
+    check("PNCT — 선석 T3 → '3번선석'", (by.get("TNJP055") or {}).get("berth") == "3번선석",
+          repr((by.get("TNJP055") or {}).get("berth")))
+    check("PNCT — 페리 선석 F1 → '페리선석'",
+          (by.get("RZOR078") or {}).get("berth") == "페리선석"
+          and (by.get("RZOR078") or {}).get("berth_raw") == "F1",
+          repr((by.get("RZOR078") or {}).get("berth")))
+    check("PNCT — 실응답 28줄 모두 선석을 읽었다(빈 berth 없음)",
+          all(r.get("berth") for r in (rows or [])),
+          str([r["master_vvd"] for r in (rows or []) if not r.get("berth")]))
+    check("PNCT — 모르는 선석 코드는 비우고 사유를 남긴다(지어내지 않는다)",
+          bs.pnct_berth_text("T9") == "" and bs.pnct_berth_text("F2") == ""
+          and bs.pnct_berth_text("") == "" and bs.pnct_berth_text("T3(S)") == "3번선석")
+    check("PNCT — 만든 표기가 앱 isValidBerth 를 통과한다(3자 이상 · 대문자 약어 아님)",
+          all(_valid_berth(r["berth"]) for r in (rows or [])),
+          str(sorted({r["berth"] for r in (rows or [])})))
 
     # (2) PCTC 실응답 판독
     rows2, why2, notes2 = bs.parse_pctc(_fixture("berth_pctc_20260806.html"), now_ms=BERTH_NOW)
@@ -2671,6 +2724,12 @@ def test_berth_schedule():
           why3 or "%d줄" % len(rows3 or []))
     check("비관할 항로(PXS·PQS·JWKP)에 excluded 표시",
           all(r["excluded"] == (r["route"] in ("PXS", "PQS", "JWKP")) for r in rows3))
+    # 0.6-02 — 설정이 비어도 기본값을 찾아야 한다(옛 설정·시험 호출이 여기서 죽지 않게).
+    check("설정에 excluded_routes 가 없으면 기본값(PXS·PQS·JWKP)",
+          bs.excluded_routes({}) == ["PXS", "PQS", "JWKP"]
+          and bs.excluded_routes(None) == ["PXS", "PQS", "JWKP"]
+          and bs.excluded_routes({"excluded_routes": ["zzz"]}) == ["ZZZ"],
+          str(bs.excluded_routes({})))
 
     # (4) 한쪽이라도 실패하면 배정표를 주지 않는다(반쪽으로 지우지 않기)
     for boom in ("PNCT", "PCTC"):
@@ -2705,6 +2764,23 @@ def test_berth_schedule():
           not ok_ex and "비관할" in why_ex, why_ex)
     ok_out, _r = au.registration_gate(plan, cache, "MCAP", ["631S"])
     check("게이트 — 배정표에 없는 선박은 종전대로 받는다(fail-open)", ok_out)
+    # 0.6-02 — 줄을 못 찾아도 '이 배는 통째로 비관할'이면 새 카드를 만들지 않는다.
+    ok_off, why_off = au.registration_gate(plan, cache, "PCSG", ["2639E"])
+    check("게이트 — 배정표 창 밖 항차라도 비관할 선박이면 막는다(PCSG 2639E)",
+          not ok_off and "비관할" in why_off, why_off)
+    check("선박 판정 — 배정표 줄이 모두 비관할일 때만 항로를 돌려준다",
+          plan.excluded_route_for("PCSG") == "PQS"
+          and plan.excluded_route_for("NGTR") == "PXS"
+          and plan.excluded_route_for("TNJP") == ""
+          and plan.excluded_route_for("ZZZZ") == "",
+          "%r / %r" % (plan.excluded_route_for("PCSG"), plan.excluded_route_for("TNJP")))
+    mixed = au.BerthPlan([
+        {"vessel_code": "MIXD", "voy_d": "1E", "voy_l": "", "route": "PQS", "excluded": True},
+        {"vessel_code": "MIXD", "voy_d": "3E", "voy_l": "", "route": "PTK", "excluded": False}])
+    check("선박 판정 — 한 줄이라도 관할 항로면 선박 단위로 지우지 않는다(추측 금지)",
+          mixed.excluded_route_for("MIXD") == "")
+    ok_mix, _r = au.registration_gate(mixed, {"names": {}, "codes": {}}, "MIXD", ["9E"])
+    check("게이트 — 항로가 섞인 선박은 종전대로 받는다(fail-open)", ok_mix)
     ok_none, _r = au.registration_gate(None, cache, "TNJP", ["26354E"])
     check("게이트 — 배정표를 못 받았으면 아무도 막지 않는다", ok_none)
 
@@ -2746,6 +2822,9 @@ def test_berth_schedule():
     _f2, r2 = au.plan_info_fields(by2.get("STMJ-0007-"))
     check("보강 — PCTC 는 부두·선석까지 채운다",
           r2.get("pier") == "PCTC" and r2.get("berth") == "동부두 8번선석")
+    check("보강 — PNCT 도 선석을 채운다(0.6-02 · T2 → 2번선석)",
+          refresh_f.get("pier") == "PNCT" and refresh_f.get("berth") == "2번선석",
+          "%r / %r" % (refresh_f.get("pier"), refresh_f.get("berth")))
     _f3, r3 = au.plan_info_fields(by2.get("XTPG-0029-"))
     check("보강 — 출항 시각이 없으면 planDate 를 아예 안 보낸다(지어내지 않는다)",
           "planDate" not in r3 and r3.get("terminalStatus") == "planned")
@@ -2805,29 +2884,36 @@ def _berth_reconcile(au, plan, http):
           str(sorted(out["deleted"])))
     check("정리 — 검수 흔적이 있으면 나갔어도 지우지 않고 보고만 한다(TNJP 26355E)",
           "TNJP_26355E" in out["held"] and "TNJP_26355E" not in out["deleted"])
-    check("정리 — 지우기 전에 대상 전체 목록을 로그에 남긴다",
-          "지난 항차 카드" in text and "OBWH_2705E" in text)
+    check("정리 — 지우기 전에 대상 전체 목록을 사유와 함께 로그에 남긴다",
+          "치울 카드" in text and "OBWH_2705E" in text and "비관할 항로 PQS" in text)
     check("정리 — 배정표에 없는 항차는 손대지 않는다(MCAP 631S · KSKM 2615S · YKTD 2612E)",
           not ({"MCAP_631S", "KSKM_2615S", "YKTD_2612E", "SWRG_2607N", "STSE_2657E",
                 "XTPG_534E", "DXQD_2629W"} & set(out["deleted"] + out["held"])))
-    check("정리 — 비관할 항로(PQS) 항차는 판단을 미루고 그대로 둔다(PCSG 4장)",
-          not ({"PCSG_2639E", "PCSG_2640E", "PCSG_2640W", "PCSG_2641W"}
-               & set(out["deleted"] + out["held"] + [d for d, _c in out["merged"]])))
+    # 0.6-02 — 비관할 항로(PQS) 카드는 이제 치운다. 2640E·2641W 는 배정표에 줄이 있고,
+    #   2639E·2640W 는 창 밖이라 줄이 없다(선박 단위 판정으로 잡힌다).
+    check("정리 — 비관할 항로(PQS) 카드를 치운다(PCSG 4장 · 줄이 있는 2장 + 창 밖 2장)",
+          {"PCSG_2639E", "PCSG_2640E", "PCSG_2640W", "PCSG_2641W"} <= set(out["deleted"]),
+          str(sorted(out["deleted"])))
+    check("정리 — 비관할 항로 카드는 일정 보강도 하지 않는다(손대지 않고 지운다)",
+          not [c for c in db.calls
+               if c[0] in ("PUT", "PATCH") and "PCSG" in str(c[1])],
+          str([c[:2] for c in db.calls if c[0] in ("PUT", "PATCH") and "PCSG" in str(c[1])]))
     check("정리 — 실패 0건", out["errors"] == 0, str(out["errors"]))
 
-    # 37장 → 19장. 라이브라면 18장이지만 이 시험은 TNJP_26355E 에 검수 기록을 일부러 심어
+    # 37장 → 15장. 라이브라면 14장이지만 이 시험은 TNJP_26355E 에 검수 기록을 일부러 심어
     #   '나갔어도 흔적이 있으면 안 지운다'를 증명하므로 그 한 장이 더 남는다.
     left = sorted(k.split("/")[1] for k in db.data if k.endswith("/info"))
-    check("정리 뒤 남은 카드 19장(37 → 19 · 흔적 있는 1장 포함)",
-          len(left) == 19, "%d장: %s" % (len(left), ", ".join(left)))
+    check("정리 뒤 남은 카드 15장(37 → 15 · 흔적 있는 1장 포함)",
+          len(left) == 15, "%d장: %s" % (len(left), ", ".join(left)))
 
     info = db.data.get("voyages/NSDC_2607N/info") or {}
     check("보강 — 배정표가 빈 짝을 채운다(NSDC 2607N → voy_l 2608S)",
           info.get("voy_l") == "2608S", json.dumps(info, ensure_ascii=False))
-    check("보강 — 작업(예정)일시·상태·부두가 채워진다",
+    check("보강 — 작업(예정)일시·상태·부두·선석이 채워진다",
           info.get("planDate") == "2026-08-07 21:00 ~ 2026-08-08 05:00"
           and info.get("planSrc") == "plan" and info.get("terminalStatus") == "planned"
-          and info.get("pier") == "PNCT", json.dumps(info, ensure_ascii=False))
+          and info.get("pier") == "PNCT" and info.get("berth") == "2번선석",
+          json.dumps(info, ensure_ascii=False))
     check("보강 — 사람이 넣은 값(vsl·createdBy·autoRegistered)은 그대로",
           info.get("createdBy") == "자동등록(수집기)" and info.get("vsl") == "NSDC"
           and info.get("autoRegistered") is True)
@@ -2846,6 +2932,25 @@ def _berth_reconcile(au, plan, http):
     check("멱등 — 두 번째 판은 쓰기(PUT/PATCH/DELETE)가 없다",
           not [c for c in db.calls[before:] if c[0] in ("PUT", "PATCH", "DELETE")],
           str([c[:2] for c in db.calls[before:] if c[0] in ("PUT", "PATCH", "DELETE")]))
+
+    # 0.6-02 — 비관할 항로라도 검수 흔적·사람이 만든 카드는 지우지 않고 보고만 한다.
+    db3 = FakeDB({
+        "voyages/PCSG_2640E/info": _auto_info("PCSG", "2640E", voy_d="2640E"),
+        "voyages/PCSG_2640E/records": {"r1": {"cn": "ZZZU9999999", "by": "김성일"}},
+        "voyages/PCSG_2641W/info": dict(_auto_info("PCSG", "2641W", voy_l="2641W"),
+                                        autoRegistered=False, createdBy="김성일"),
+    })
+    lines3 = []
+    out3 = au.reconcile_with_plan(db3, {"names": {}, "codes": {}, "tally": {}, "pairs": {}},
+                                  plan, lines3.append)
+    check("정리 — 비관할 항로라도 검수 흔적이 있으면 지우지 않는다(PCSG 2640E)",
+          "PCSG_2640E" in out3["held"] and "PCSG_2640E" not in out3["deleted"]
+          and "voyages/PCSG_2640E/info" in db3.data, str(out3))
+    check("정리 — 비관할 항로라도 사람이 만든 카드는 지우지 않는다(PCSG 2641W)",
+          "PCSG_2641W" in out3["held"] and "PCSG_2641W" not in out3["deleted"]
+          and "voyages/PCSG_2641W/info" in db3.data, str(out3))
+    check("정리 — 보류한 카드는 사유를 로그에 남긴다",
+          "검수 흔적" in "\n".join(lines3) and "사람이 만든" in "\n".join(lines3))
 
     _berth_cycle(au, http)
 

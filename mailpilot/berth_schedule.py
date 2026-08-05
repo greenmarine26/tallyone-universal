@@ -17,7 +17,8 @@
   vessel_name   선박 실명            master_vvd  모선항차 원문(OBWH090 · STMJ-0007-(P))
   voy_d/voy_l   선사항차 짝(양하 E/N · 선적 W/S). 방향이 안 맞는 쪽은 비운다(지어내지 않는다)
   route         항로코드             pier        부두 'PCTC' | 'PNCT'
-  berth         검수앱 규약 표기 '동부두 9번선석'(못 만들면 ''), berth_raw 는 터미널 원문
+  berth         검수앱 규약 표기 — PCTC '9B'→'동부두 9번선석' · PNCT 'T2'→'2번선석' ·
+                'F1'→'페리선석'(못 만들면 ''). berth_raw 는 터미널 원문
   eta/etb/etd/ata/atb/atd  'YYYY-MM-DD HH:MM'(못 읽으면 '')
   status        검수앱 계약값 'departed' | 'working' | 'planned' | ''
   status_raw    터미널 원문 상태(PNCT VSL_STATE 'D'/'P' · PCTC 차트 class plan/work/done)
@@ -43,10 +44,16 @@ USER_AGENT = "Mozilla/5.0 (MailPilot Uni berth-schedule reader)"
 DEFAULT_DAYS_BACK = 7
 DEFAULT_DAYS_FWD = 7
 
+# 비관할 항로(검수사 확정 2026-08-06) — 설정(excluded_routes)이 비었을 때 쓰는 기본값.
+#   설정을 안 거친 호출(시험·옛 설정)에서 이 이름이 없으면 NameError 로 사이클이 죽는다.
+DEFAULT_EXCLUDED_ROUTES = ("PXS", "PQS", "JWKP")
+
 _NS = "{http://www.nexacroplatform.com/platform/dataset}"
 
 # PNCT OPR_VVD — `OBWH090(2705E/2706W)` · 한쪽이 빈 `ATPR033(/2636W)` 도 있다.
 _PNCT_PAIR = re.compile(r"^\s*([A-Z0-9]+)\s*\(\s*([A-Z0-9]*)\s*/\s*([A-Z0-9]*)\s*\)")
+# PNCT 선석 코드 — `T2` · `F1` · 접안 방향이 붙은 `T3(S)` · `F1(P)`.
+_PNCT_BERTH = re.compile(r"^\s*([A-Z])\s*(\d+)")
 # 시각 — PNCT `2026/08/05 22:00` · PCTC `2026-08-05 08:00`
 _DT = re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}):(\d{2})")
 
@@ -137,6 +144,27 @@ def _set_pair(row, first, second, note):
 
 # ──────────────────────────── PNCT ────────────────────────────
 
+def pnct_berth_text(label):
+    """PNCT 선석 코드 → 검수앱이 받아 주는 표기. 'T2' → '2번선석' · 'F1' → '페리선석'.
+
+    검수사 화면(PNCT 배정표 비고란) 실측 2026-08-06: **F1 = Ferry Berth(페리 선석) ·
+    T1~T3 = 1~3 Berth**. 앱 src/utils.js isValidBerth 는 두 글자짜리('T2')를 걸러 내고
+    저장된 berth 를 지워 버리므로(HomePage 301행) 앱 규약 표기로 바꿔 넣는다.
+    번호 매김은 **PNCT 자체 선석 번호** 그대로다 — PORT-MIS 계선장소(동부두 N번선석)로
+    옮겨 적지 않는다(대응표를 받은 적이 없다. 지어내지 않는다).
+    모르는 코드는 '' — 없는 선석을 만들어 내지 않는다.
+    """
+    match = _PNCT_BERTH.match(str(label or "").upper())
+    if not match:
+        return ""
+    kind, number = match.group(1), int(match.group(2))
+    if kind == "F" and number == 1:
+        return "페리선석"
+    if kind == "T" and 1 <= number <= 3:
+        return "%d번선석" % number
+    return ""
+
+
 def pnct_body(str_date, end_date):
     """넥사크로 조회 본문(ds_cond) — 화면이 보내는 모양 그대로."""
     return (
@@ -177,9 +205,13 @@ def parse_pnct(text, now_ms=None):
             row["route"] = raw.get("ROUTE", "").upper()
             row["dis_van"] = raw.get("DIS_VAN", "")
             row["load_van"] = raw.get("LOAD_VAN", "")
-            # PNCT 선석 표기(T2·T3·F1)에는 선석 번호가 없다. 앱 isValidBerth 가 두 글자를
-            #   걸러 내고 저장값을 지워 버리므로(HomePage 301행) berth 는 비우고 원문만 남긴다.
+            # PNCT 선석 표기(T2·T3·F1) → 앱 규약 표기(2번선석·페리선석). 검수사 화면 실측 근거는
+            #   pnct_berth_text 주석에 있다. 못 읽은 코드는 비우고 원문(berth_raw)만 남긴다.
             row["berth_raw"] = raw.get("BERTH_NO", "") or raw.get("BERTH", "")
+            row["berth"] = pnct_berth_text(row["berth_raw"])
+            if row["berth_raw"] and not row["berth"]:
+                notes.append("PNCT %s 선석 코드를 몰라 비웠습니다: %r"
+                             % (row["master_vvd"], row["berth_raw"]))
             for field, key in (("eta", "ETA_DATE"), ("etb", "ETB_DATE"), ("etd", "ETD_DATE"),
                                ("ata", "ATA_DATE"), ("atb", "ATB_DATE"), ("atd", "ATD_DATE")):
                 given = raw.get(key, "")
