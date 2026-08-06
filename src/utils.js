@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.7-02';   // 카고플랜 정본 판정 — 조회 경로(source)가 아니라 항목 안쪽(_userOwned)을 본다(isUserOwnedBayDict 단일 소스) + fbSaveShipBayDict 조용한 실패 제거
+export const APP_VERSION = 'TallyUni 0.8';   // 홈 항차 목록을 자료 완성율 순으로 — 완성율(1차) → 자료 유무(2차) → 작업시간 근접순(3차)
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가

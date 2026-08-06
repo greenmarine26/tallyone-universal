@@ -268,12 +268,51 @@ export default function HomePage({ voyages, inspectors, inspector, portMisData =
         const _pick = _live.length
           ? _live.sort((a, b) => b.p - a.p || (a.eta ?? a.etd) - (b.eta ?? b.etd))[0]
           : (_cands.sort((a, b) => (b.etd ?? b.eta ?? 0) - (a.etd ?? a.eta ?? 0))[0] || null);
+        // TallyUni 0.8: 자료 완성율 — 정렬 1차 키 (검수사 확정 2026-08-06).
+        //   "자료가 완성된 걸 맨 위에 올리고 완성율을 기준으로 순서를 정해 주세요. 금일 작업 선박이라도
+        //    자료가 없으면 자료 있는 선박 밑에 놓고, 자료가 올라오면 작업순서 순으로 위로 올라오게요."
+        //   완성율 = EDI 평택분과 리스트가 맞아떨어진 비율(매칭율). computeStats 와 **같은 규칙**을 쓴다 —
+        //   안 그러면 카드 숫자와 정렬이 어긋난다.
+        //   항차가 가진 섹션 전부 기준: 양하·선적 둘 다 있으면 둘 다 맞아야 1.0,
+        //   한쪽만 있는 항차(ATPR류)는 그 한쪽만 보고 1.0 이 될 수 있다.
+        //   분모에 max 를 쓰는 이유 — EDI만·리스트만 있으면 그쪽 수가 분모가 되어 완성율이 낮게 나온다.
+        //   플랜 슬롯(`__SLOT_`, 컨번호 미배정 자리)은 매칭될 수 없으므로 분모에서 뺀다.
+        const _readyOf = (sec, mode) => {
+          if (!sec) return null;                       // 섹션 없음 — 계산에서 제외
+          const edi = sec.ediContainers || {};
+          const recs = sec.records || {};
+          const ptk = new Set();
+          Object.entries(edi).forEach(([key, c]) => {
+            if (!c) return;
+            const isPtk = mode === 'discharge' ? isPyeongtaekPort(c.pod) : isPyeongtaekPort(c.pol);
+            if (isPtk) ptk.add(c.cn || key);
+          });
+          const rec = new Set(ownDirCns(recs, mode));
+          const matched = [...ptk].filter(cn => rec.has(cn)).length;
+          const slots = [...ptk].filter(cn => String(cn).startsWith('__SLOT_')).length;
+          const den = Math.max(ptk.size - slots, rec.size);
+          return den > 0 ? { matched, den } : null;
+        };
+        const _rs = [_readyOf(v.discharge, 'discharge'), _readyOf(v.loading, 'loading')].filter(Boolean);
+        const _num = _rs.reduce((s, x) => s + x.matched, 0);
+        const _den = _rs.reduce((s, x) => s + x.den, 0);
         return { key: k, ...v, _berth: berth, _pier: pier, _rawBerth: rawBerth,
                  _etaMs: _pick ? _pick.eta : null,     // V9.01: 작업시간 근접 정렬용
                  _etdMs: _pick ? _pick.etd : null,
+                 _ready: _den > 0 ? _num / _den : 0,   // TallyUni 0.8: 자료 완성율(정렬 1차)
+                 _hasData: _den > 0,                   // TallyUni 0.8: 자료 유무(정렬 2차)
                  _etaSrc: _pick ? _pick.src : '' };    // V9.35: 작업일시 배지 출처 표기용
       })
       .sort((a, b) => {
+        // TallyUni 0.8: ① 자료 완성율 내림차순이 1차 키. 작업시간 근접순은 동률일 때만 본다.
+        const _rd = (b._ready || 0) - (a._ready || 0);
+        if (Math.abs(_rd) > 0.0001) return _rd;        // 부동소수 오차 방어
+        // ② 자료 유무 — 완성율이 같아도(대개 둘 다 0) 자료가 하나라도 있는 배가 위다.
+        //   완성율만으로 정렬하면 EDI 는 이미 받았는데 리스트가 안 온 항차(매칭 0 → 완성율 0)가
+        //   자료 한 장 없는 항차와 뒤섞인다. 검수사 문장 "자료가 없으면 자료 있는 선박 밑에"를
+        //   만족하려면 자료 유무가 따로 필요하다(tallyuni 실 33항차 실측: 완성율 0 인 24개 중
+        //   6개가 EDI 216~898대를 이미 받은 항차였다).
+        if (!!b._hasData !== !!a._hasData) return (b._hasData ? 1 : 0) - (a._hasData ? 1 : 0);
         // V9.01: 작업시간 근접순 (사용자 확정 2026-07-17)
         //   ①정박·작업중(출항 임박한 순) ②입항 예정(접안 가까운 순) ③출항·지남(최근 순) ④일정 미상(등록 최신순)
         //   PORT-MIS 신고 + 수집기 선석배정(berth_schedule) 레코드의 eta/etd 기준. 부두 그룹(현 위치 우선)은 이 정렬 위에 얹힘.
