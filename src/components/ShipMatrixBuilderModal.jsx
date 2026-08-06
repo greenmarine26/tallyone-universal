@@ -34,10 +34,10 @@ import { BayBoxV2, CARGO_V2_CSS } from './PrintableCargoPlanV2.jsx';
 import { buildEmptyBayRenderData } from '../cargoPlanCore.js';
 
 export default function ShipMatrixBuilderModal({ voyage, containers, onClose, onSaved }) {
-  const [matrix, setMatrix] = useState(null);
+  const [matrix, setMatrixRaw] = useState(null);
   // 선박 메타 자동 채움 (voyage.info의 EDI 자동 추출 데이터)
   const autoMeta = useMemo(() => extractShipMetaFromVoyage(voyage), [voyage]);
-  const [shipMeta, setShipMeta] = useState(autoMeta);
+  const [shipMeta, setShipMetaRaw] = useState(autoMeta);
   const [editMeta, setEditMeta] = useState(false);
   const [pdfStatus, setPdfStatus] = useState('idle');
   const [defStatus, setDefStatus] = useState('idle');   // V7.36 .def 업로드
@@ -78,6 +78,25 @@ export default function ShipMatrixBuilderModal({ voyage, containers, onClose, on
     if (!Array.isArray(editors)) return false;
     return !!currentInspector && editors.includes(currentInspector);
   }, [editors, currentInspector]);
+
+  // ── TallyUni 0.9: 읽기 전용 게이트 (구멍 봉인) ────────────────────────────
+  //   전까지 이 화면은 저장 버튼만 숨겼다. 권한 없는 사람도 들어와 베이를 지우고
+  //   티어를 바꾸고 다른 배를 복제해 얹을 수 있었고(화면 안에서는 그대로 반영됐다),
+  //   자기가 무엇을 망가뜨렸는지 모른 채 나갔다. 편집 핸들러가 12개라 개별로 막으면
+  //   다음에 하나 더 늘 때 또 뚫린다 — 모든 편집이 결국 지나가는 setMatrix/setShipMeta
+  //   한 자리에서 막는다. 최초 분석·복원(읽기 로드)은 setMatrixRaw 를 그대로 쓴다.
+  const READONLY_MSG = '🔒 베이 매트릭스는 관리자만 수정할 수 있습니다.';
+  const roWarnRef = useRef(0);
+  const warnReadOnly = () => {
+    const now = Date.now();
+    console.warn('[ShipMatrixBuilder] 읽기 전용 — 수정 차단. 현재 검수원:', currentInspector || '(미선택)');
+    if (now - roWarnRef.current > 5000) {
+      roWarnRef.current = now;
+      try { window.alert(READONLY_MSG); } catch { /* headless */ }
+    }
+  };
+  const setMatrix = (v) => { if (!canEdit) { warnReadOnly(); return; } setMatrixRaw(v); };
+  const setShipMeta = (v) => { if (!canEdit) { warnReadOnly(); return; } setShipMetaRaw(v); };
 
   const addBay = (bayNumRaw, pairEvenRaw) => {
     const n = parseInt(bayNumRaw);
@@ -201,21 +220,21 @@ export default function ShipMatrixBuilderModal({ voyage, containers, onClose, on
       const restored = bayDictEntryToMatrix(saved);
       if (restored) {
         if (saved.provisional || saved.bayDef?.provisional) restored.provisional = true;   // V7.99-5: 보정중 복원
-        setMatrix(restored);
+        setMatrixRaw(restored);   // 읽기 로드 — 게이트 통과 대상 아님
         initAnalyzedRef.current = true;
         return;
       }
     }
     // 2) 저장 없으면 EDI 분석 + 1~max 자동 채움
     if (!containers || containers.length === 0) {
-      setMatrix({ byBay: {}, _empty: true });
+      setMatrixRaw({ byBay: {}, _empty: true });   // 읽기 로드
       initAnalyzedRef.current = true;
       return;
     }
     const m1 = buildMatrixFromEdi(containers);
     const m2 = augmentMatrixFromBayDict(m1, autoMeta.imo, autoMeta.code);
     const m3 = fillEmptyBaysSequential(m2);  // 1~max 추정 베이 자동 추가
-    setMatrix(m3);
+    setMatrixRaw(m3);   // 읽기 로드
     initAnalyzedRef.current = true;
   }, [containers, autoMeta.imo, autoMeta.code]);
 
@@ -488,6 +507,9 @@ export default function ShipMatrixBuilderModal({ voyage, containers, onClose, on
     entry._userOwned = true;
     entry.editorName = currentInspector;
     entry.updatedAt = stamp;
+    // TallyUni 0.9: 누가 언제 확정했는지 항목 안에 남긴다 — 잠긴 사전의 근거.
+    entry.confirmedBy = currentInspector;
+    entry.confirmedAt = stamp;
     // V7.99-5: 복제로 만든 보정중 선박이면 표시 보존 (확정본과 구분).
     if (matrix.provisional) {
       entry.provisional = true;
@@ -513,6 +535,8 @@ export default function ShipMatrixBuilderModal({ voyage, containers, onClose, on
         bayDef: entry.bayDef,
         editorName: currentInspector,
         updatedAt: stamp,
+        confirmedBy: currentInspector,
+        confirmedAt: stamp,
         _inspector: currentInspector,
       }).then(r => {
         if (r) setSavingMsg(s => s + ' · ☁ 동기화됨 (다른 기기에서도 보임)');
@@ -669,9 +693,18 @@ export default function ShipMatrixBuilderModal({ voyage, containers, onClose, on
         {/* 헤더 */}
         <div className="p-4 border-b border-zinc-700 flex justify-between items-center">
           <div>
-            <h2 className="text-lg font-bold">🚢 신규 선박 베이 매트릭스 빌더{matrix?.provisional && <span className="ml-2 text-xs px-2 py-0.5 bg-sky-600 rounded align-middle">🛠 보정중</span>}</h2>
+            <h2 className="text-lg font-bold">
+              {canEdit ? '🚢' : '🔒'} 신규 선박 베이 매트릭스 빌더
+              {matrix?.provisional && <span className="ml-2 text-xs px-2 py-0.5 bg-sky-600 rounded align-middle">🛠 보정중</span>}
+              {/* TallyUni 0.9: 읽기 전용이면 제목에서 바로 보이게 — 만지고 나서 알면 늦다 */}
+              {!canEdit && editors !== null && (
+                <span className="ml-2 text-xs px-2 py-0.5 bg-amber-700 rounded align-middle">읽기 전용</span>
+              )}
+            </h2>
             <div className="text-xs text-zinc-400 mt-1">
-              현재 항차의 EDI에서 선박 정보 자동 추출 + 베이 구조 분석
+              {canEdit
+                ? '현재 항차의 EDI에서 선박 정보 자동 추출 + 베이 구조 분석'
+                : '🔒 관리자만 수정할 수 있습니다 — 보기만 가능합니다'}
             </div>
           </div>
           <button onClick={onClose} className="text-zinc-400 hover:text-white text-2xl px-2">×</button>

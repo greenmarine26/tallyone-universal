@@ -28,6 +28,7 @@ import { BayBoxV2, CARGO_V2_CSS } from './components/PrintableCargoPlanV2.jsx';
 import PrintableCargoPlanV2 from './components/PrintableCargoPlanV2.jsx';
 import { SHIP_BAY_DICT_V2 } from './data/shipBayDict_v2.js';
 import * as P from './planEditCore.js';
+import { gateBayDictWrite } from './bayDictGuard.js';   // TallyUni 0.9: 사전 쓰기 관리자 게이트
 
 // 오프라인 동작: parseListExcel의 loadSheetJS가 CDN을 받지 않도록 번들 XLSX 주입
 if (typeof window !== 'undefined') window.XLSX = window.XLSX || XLSX;
@@ -187,9 +188,15 @@ function pickBestDict(ediBayNums, preferNames = []) {
 
 // 검수앱이 내보낸 베이사전 JSON을 이 페이지의 사용자 사전(localStorage)에 등록한다.
 //   형식: 단일 entry {imo,code,name,callsign,bayDef} · 배열 · {코드:entry} 맵 모두 허용.
-//   addToUserBayDict()는 관리자 게이트를 타므로 단독본에서는 저장소에 직접 쓴다.
+//   TallyUni 0.9: 예전 주석은 "addToUserBayDict()가 관리자 게이트를 타므로 여기서는 직접 쓴다"였다.
+//     그게 곧 게이트 우회였다 — 이 화면으로 들어오면 권한 없는 사람도 사전을 정본(source:'user',
+//     verified:true)으로 갈아 끼울 수 있었고, 그 사본이 카고플랜의 격자가 된다.
+//     저장소에 직접 쓰는 것 자체는 그대로 두되(단독본은 firebase.js를 부르지 않는다),
+//     그 앞에 같은 판정(canWriteBayDict)을 세운다. 차단 시 null을 돌려준다 — 호출부가 구분한다.
 const USER_DICT_KEY = 'master_user_bay_dict_v1';
-function importUserDict(json) {
+// export 는 시뮬이 복제본이 아니라 이 함수 자체를 부르게 하려는 것이다(_sim/seedlock.cjs).
+export function importUserDict(json) {
+  if (!gateBayDictWrite('플랜편집기 사전 불러오기')) return null;
   let list = [];
   if (Array.isArray(json)) list = json;
   else if (json && json.bayDef) list = [json];
@@ -464,6 +471,8 @@ function App() {
   const loadDict = async (file) => {
     try {
       const ok = importUserDict(JSON.parse(await file.text()));
+      // TallyUni 0.9: null = 관리자 게이트에서 차단됨(형식 문제와 구분해 알린다).
+      if (ok === null) { setMsg('🔒 베이사전 등록은 관리자만 할 수 있습니다.'); return; }
       if (!ok.length) { setMsg('베이사전 형식이 아닙니다 — 검수앱 [선박목록]의 내보내기 JSON을 넣어주세요'); return; }
       _effCache.clear();
       setUserDict(Object.keys(JSON.parse(localStorage.getItem(USER_DICT_KEY) || '{}')));

@@ -58,6 +58,7 @@ import { exportSectionToCSV } from '../components/CSVExport.jsx';
 import PrintHubModal from '../components/PrintHubModal.jsx';
 import TestLabModal from '../components/TestLabModal.jsx';   // V9.25: 검증 모드 — 성일님 전용
 import ReeferMemoModal from '../components/ReeferMemoModal.jsx';   // TallyOne 1.8: 리퍼 온도 확인
+import { useCanWriteBayDict } from '../useMatrixPerm.js';   // TallyUni 0.9: 매트릭스 수정 권한(관리자 잠금)
 
 export default function VoyagePage({ voyageKey, voyage, inspector, inspectors, portMisData = {}, pilotForecast = {}, onGoHome, onModeChange, initModeOverride = null }) {
   // 양하/선적 모드 — 둘 다 있으면 토글, 하나만 있으면 자동
@@ -1720,6 +1721,10 @@ function DataTab({ voyageKey, mode, voyage, setMode, inspector }) {
   const [bulkAscOpen, setBulkAscOpen] = useState(false);
   // M6.93.1: 신규 선박 베이 매트릭스 빌더 (EDI + 사전 + PDF + 사용자 폼)
   const [matrixBuilderOpen, setMatrixBuilderOpen] = useState(false);
+  // TallyUni 0.9: 빌더 진입 자체를 관리자에게만 연다.
+  //   전까지는 이 버튼에 게이트가 없어 누구나 들어가 매트릭스를 통째로 바꿔 놓을 수 있었고
+  //   (저장 버튼만 숨겨져 있었다), 화면 안에서 지운 베이는 되돌릴 수 없었다.
+  const { canEdit: canEditMatrix } = useCanWriteBayDict();
   const ediRef = useRef(null);
   const listRef = useRef(null);
   const cameraRef = useRef(null);
@@ -2625,16 +2630,22 @@ function DataTab({ voyageKey, mode, voyage, setMode, inspector }) {
         onBulkUpload={() => setBulkStowageOpen(true)}
         onAscUpload={() => setBulkAscOpen(true)}
       />
-      {/* M6.93.1: 신규 선박 베이 매트릭스 빌더 */}
+      {/* M6.93.1: 신규 선박 베이 매트릭스 빌더 — TallyUni 0.9: 관리자만 진입 */}
       <button
-        onClick={() => setMatrixBuilderOpen(true)}
-        className="w-full bg-gradient-to-br from-emerald-900/40 to-teal-900/40 hover:from-emerald-900/60 border border-emerald-700/50 rounded-lg p-3 flex items-center gap-3 active:scale-[0.98] transition"
+        onClick={() => canEditMatrix && setMatrixBuilderOpen(true)}
+        disabled={!canEditMatrix}
+        title={canEditMatrix ? '' : '관리자만 수정할 수 있습니다'}
+        className={`w-full bg-gradient-to-br from-emerald-900/40 to-teal-900/40 border border-emerald-700/50 rounded-lg p-3 flex items-center gap-3 transition ${
+          canEditMatrix ? 'hover:from-emerald-900/60 active:scale-[0.98]' : 'opacity-50 cursor-not-allowed'
+        }`}
       >
-        <span className="text-xl">🚢</span>
+        <span className="text-xl">{canEditMatrix ? '🚢' : '🔒'}</span>
         <div className="text-left flex-1">
           <div className="text-sm font-bold text-emerald-300">신규 선박 베이 매트릭스 빌더</div>
           <div className="text-[11px] text-emerald-400/70 mt-0.5">
-            현재 EDI 자동 분석 → 베이사전 보강 → PDF 추가 → 사용자 검증 → 즉시 등록
+            {canEditMatrix
+              ? '현재 EDI 자동 분석 → 베이사전 보강 → PDF 추가 → 사용자 검증 → 즉시 등록'
+              : '관리자만 수정할 수 있습니다'}
           </div>
         </div>
       </button>

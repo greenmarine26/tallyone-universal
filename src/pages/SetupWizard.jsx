@@ -12,6 +12,9 @@
 // TallyUni 0.6: QR 링크(?cfg=)로 접속 설정이 먼저 들어올 수 있다 — 그 결과를 첫 렌더에서 읽는다.
 //   관용 파서·보조 앱(FB_KEYS·FB_REQUIRED·parseFirebaseConfig·withWizardApp) 정의는 linkCfg.js로 옮겼다.
 //   부팅 게이트(main.jsx)가 마법사보다 먼저 그것들을 써야 해서다 — 내용·동작은 0.5와 같다.
+// TallyUni 0.9: 설치가 끝나면 서버가 텅 비어 있지 않다 — 매트릭스 권한자 명단(최초 관리자 1인)과
+//   기본 선박 베이사전 씨앗(public/seed/ship_bay_dict_seed.json)을 함께 심는다. 두 번째 기기
+//   경로(handleUseExisting)는 아무것도 심지 않는다 — 그 회사 서버엔 이미 들어 있다.
 import React, { useState } from 'react';
 import { Anchor, Database, Building2, UserCog, Check, AlertCircle, Image as ImageIcon } from 'lucide-react';
 import { SK } from '../utils.js';
@@ -112,6 +115,8 @@ export default function SetupWizard() {
 
   const [busy, setBusy] = useState(false);
   const [saveErr, setSaveErr] = useState('');
+  // TallyUni 0.9: 사전 시딩 진행 문구 — 96척을 심는 동안 화면이 멈춘 것처럼 보이면 안 된다.
+  const [seedMsg, setSeedMsg] = useState('');
 
   // TallyUni 0.4: 1단계에서 서버를 먼저 들여다본 결과.
   //   found = DB에 이미 있는 settings(= 다른 기기가 마친 회사 설정), null이면 처음 여는 프로젝트.
@@ -223,19 +228,54 @@ export default function SetupWizard() {
     }
     // ② 입력한 설정으로 보조 앱을 띄워 서버에 첫 데이터를 심는다.
     //    기본 앱과 다른 이름이라 리로드 후 충돌하지 않는다. 끝나면 withWizardApp이 세션을 정리한다(0.4).
+    //    TallyUni 0.9: 여기서 베이사전 씨앗까지 심는다. 씨앗 실패는 설치를 막지 않는다(아래 seedWarn).
+    let seedWarn = '';
     try {
       await withWizardApp(cfg, async (wApp) => {
         const { getDatabase, ref, set, update } = await import('firebase/database');
         const wDb = getDatabase(wApp);
+        setSeedMsg('회사 설정을 심는 중…');
         await set(ref(wDb, 'settings'), tcfg);
         // TallyUni 0.4: set → update. set은 그 사람 노드를 통째로 갈아엎어서, 앱 안에서 붙은
         //   다른 필드(직책 변경·부가 정보)가 마법사를 다시 돌릴 때마다 사라졌다.
         await update(ref(wDb, `staffList/${tcfg.owner}`), { name: tcfg.owner, role: ownerRole.trim() || '수석검수사', addedAt: Date.now() });
+        // TallyUni 0.9 ⓐ: 매트릭스 권한자 명단을 최초 관리자로 명시 시딩.
+        //   전까지는 명단 노드가 없어 fbGetMatrixEditors가 tenant().owner로 늦게 시딩했고,
+        //   그 사이 화면들은 폴백 판정으로 돌았다. 설치 순간 명단이 있는 편이 분명하다.
+        await set(ref(wDb, 'matrix_editors'), [tcfg.owner]);
+        // TallyUni 0.9 ⓑ: 기본 선박 사전(씨앗)을 ship_bay_dict_v3에 심는다.
+        //   검수사 확정 — "현장 앱의 기존 선박 사전을 앱에 보관해 두었다가 설치하면 저장소에 들어가게".
+        //   실패는 설치를 막지 않는다. 사유는 아래에서 화면에 띄우고, 나중에
+        //   [선박] 탭 → 베이사전 라이브러리 → 🌱 기본 사전 가져오기 로 다시 심을 수 있다.
+        try {
+          setSeedMsg('기본 선박 사전을 내려받는 중…');
+          const { fetchBayDictSeed, chunkShips } = await import('../bayDictSeed.js');
+          const seed = await fetchBayDictSeed();
+          const parts = chunkShips(seed.ships, 25);
+          let done = 0;
+          for (const part of parts) {
+            await update(ref(wDb, 'ship_bay_dict_v3'), part);
+            done += Object.keys(part).length;
+            setSeedMsg(`기본 선박 사전 심는 중… ${done}/${seed.codes.length}척`);
+          }
+          setSeedMsg(`기본 선박 사전 ${done}척 등록 완료`);
+        } catch (se) {
+          seedWarn = (se && se.message) ? se.message : String(se);
+          console.warn('[SetupWizard] 베이사전 씨앗 심기 실패 — 설치는 계속한다', se);
+          setSeedMsg('');
+        }
       });
     } catch (e) {
       // 조용히 실패 금지 — 사유를 보여 주고, 그래도 진행할 수 있게 한다(설정은 이미 저장됨).
       setBusy(false);
+      setSeedMsg('');
       setSaveErr(`서버에 첫 데이터를 심지 못했습니다: ${e && e.message ? e.message : e}\n설정은 이 기기에 저장됐습니다. 인터넷·데이터베이스 규칙을 확인한 뒤 [그래도 시작]을 누르면 앱은 열립니다.`);
+      return;
+    }
+    if (seedWarn) {
+      // 설치는 끝났다. 다만 사전이 비었다는 사실을 감추지 않는다.
+      setBusy(false);
+      setSaveErr(`설치는 끝났습니다. 다만 기본 선박 사전을 심지 못했습니다: ${seedWarn}\n[그래도 시작]을 누르면 앱은 정상으로 열립니다. 사전은 나중에 [선박] 탭 → 베이사전 라이브러리 → 🌱 기본 사전 가져오기 로 심을 수 있습니다.`);
       return;
     }
     location.reload();
@@ -424,6 +464,11 @@ export default function SetupWizard() {
             {saveErr && (
               <div className="bg-red-950/50 border border-red-800 rounded-lg p-3 text-red-300 text-[12px] flex gap-2 whitespace-pre-line">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><div>{saveErr}</div>
+              </div>
+            )}
+            {seedMsg && (
+              <div className="bg-emerald-950/40 border border-emerald-800 rounded-lg p-3 text-emerald-300 text-[12px]">
+                {seedMsg}
               </div>
             )}
             <div className="flex gap-2">

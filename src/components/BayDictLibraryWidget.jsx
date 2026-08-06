@@ -4,8 +4,11 @@
 //   - PDF 단일 + 일괄 등록 버튼 통합 (한 위젯 안에서 다 처리)
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { Database, ChevronDown, ChevronUp, AlertTriangle, CheckCircle2, Upload, FolderOpen } from 'lucide-react';
-import { fbSubscribeShipBayDict, fbSubscribeShipLibrary } from '../firebase.js';
+import { fbSubscribeShipBayDict, fbSubscribeShipLibrary, fbBatchSaveShipBayDict } from '../firebase.js';
 import { mergeUserBayDictFrom } from '../data/userBayDict.js';
+// TallyUni 0.9: 이미 설치를 마친 회사가 기본 선박 사전을 뒤늦게 심는 통로.
+import { fetchBayDictSeed, chunkShips } from '../bayDictSeed.js';
+import { useCanWriteBayDict } from '../useMatrixPerm.js';
 
 export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onAscUpload }) {
   const [bayDict, setBayDict] = useState({});
@@ -13,6 +16,10 @@ export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onA
   const [expanded, setExpanded] = useState(false);
   const [filter, setFilter] = useState('missing');  // missing | all | registered
   const singleRef = useRef(null);
+  // TallyUni 0.9: 기본 사전 가져오기 — 관리자(matrix_editors)에게만 보인다.
+  const { canEdit } = useCanWriteBayDict();
+  const [seedBusy, setSeedBusy] = useState(false);
+  const [seedMsg, setSeedMsg] = useState('');
 
   useEffect(() => {
     const unsubDict = fbSubscribeShipBayDict(setBayDict);
@@ -102,6 +109,48 @@ export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onA
     } else alert('저장 실패 — 브라우저 저장공간을 확인하세요.');
   };
 
+  // V TallyUni 0.9: 앱에 담아 온 기본 선박 사전(씨앗)을 저장소에 심는다.
+  //   이미 저장소에 있는 코드는 건드리지 않는다 — 이 회사가 직접 재서 고친 매트릭스를
+  //   씨앗이 덮으면 안 되기 때문이다(건너뛴 수를 결과에 그대로 보고한다).
+  const handleSeedImport = async () => {
+    if (!canEdit || seedBusy) return;
+    setSeedBusy(true);
+    setSeedMsg('기본 사전 파일을 읽는 중…');
+    try {
+      const seed = await fetchBayDictSeed();
+      const existing = new Set(Object.keys(bayDict || {}));
+      const toAdd = {};
+      let skipped = 0;
+      for (const [code, entry] of Object.entries(seed.ships)) {
+        if (existing.has(code)) { skipped++; continue; }
+        toAdd[code] = entry;
+      }
+      const addCount = Object.keys(toAdd).length;
+      if (addCount === 0) {
+        setSeedMsg(`추가할 선박이 없습니다 — 기본 사전 ${seed.codes.length}척이 모두 이미 저장소에 있습니다(건너뜀 ${skipped}척).`);
+        return;
+      }
+      if (!confirm(`기본 선박 사전 ${seed.codes.length}척 중 ${addCount}척을 저장소에 추가합니다.\n이미 있는 ${skipped}척은 건드리지 않습니다.\n진행할까요?`)) {
+        setSeedMsg('');
+        return;
+      }
+      let saved = 0, failed = 0, done = 0;
+      for (const part of chunkShips(toAdd, 25)) {
+        const r = await fbBatchSaveShipBayDict(part);
+        saved += r.saved; failed += r.failed;
+        done += Object.keys(part).length;
+        setSeedMsg(`심는 중… ${done}/${addCount}척`);
+      }
+      setSeedMsg(`✅ 추가 ${saved}척 · 건너뜀 ${skipped}척${failed ? ` · 실패 ${failed}척(권한·네트워크 확인)` : ''}`);
+    } catch (e) {
+      // 조용히 실패 금지 — 사유를 그대로 보여 준다.
+      console.error('[BayDictLibraryWidget] 기본 사전 가져오기 실패', e);
+      setSeedMsg(`⛔ 실패: ${(e && e.message) ? e.message : e}`);
+    } finally {
+      setSeedBusy(false);
+    }
+  };
+
   return (
     <div className="bg-cyan-950/30 border border-cyan-700/50 rounded-lg overflow-hidden">
       {/* 헤더 — 전체 탭으로 펼침 */}
@@ -140,6 +189,23 @@ export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onA
         <div className="border-t border-cyan-700/40 p-2.5 space-y-2">
           {/* PDF/ASC 등록 버튼 — 위젯 안에서 직접 */}
           <div className="space-y-1.5">
+            {/* TallyUni 0.9: 앱이 담아 온 기본 선박 사전을 저장소에 심는다 (관리자 전용) */}
+            {canEdit && (
+              <>
+                <button
+                  onClick={handleSeedImport}
+                  disabled={seedBusy}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-2 bg-lime-700 hover:bg-lime-600 disabled:opacity-50 text-white rounded text-xs font-bold"
+                >
+                  {seedBusy ? '심는 중…' : '🌱 기본 사전 가져오기 (앱 내장본 → 저장소)'}
+                </button>
+                {seedMsg && (
+                  <div className="text-[10px] text-lime-200 bg-lime-950/40 border border-lime-800/50 rounded px-2 py-1 whitespace-pre-line">
+                    {seedMsg}
+                  </div>
+                )}
+              </>
+            )}
             {/* V8.98-15: 공유 사전 → 이 기기 동기화 */}
             <button
               onClick={handlePullShared}
