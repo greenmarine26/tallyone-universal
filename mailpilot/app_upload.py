@@ -5,10 +5,12 @@
   voyages/{선박코드}_{항차}/info                     → 홈 화면에 항차 카드가 뜬다
   voyages/{키}/{discharge|loading}/ediContainers    → 진행막대·베이플랜·카고플랜이 산다
   voyages/{키}/{discharge|loading}/raw/edi          → 앱에서 다시 판독할 수 있는 원문
+  voyages/{키}/{discharge|loading}/records          → 매칭·누락(실번호·무게·온도) — 0.9
 
 절대 보존 원칙(현장 수집기 autoreg.py 에서 그대로 가져온다):
   · info 는 **없을 때만** 만든다. 이미 있으면 빈 voy_d/voy_l 만 채운다 — 사람이 넣은 값은 절대 안 건드린다.
-  · records·completed(검수 기록)는 이 판에서 **아예 건드리지 않는다**.
+  · records 는 0.9 부터 **보수 머지로만** 채운다 — 새 컨 추가·빈 칸 채움뿐이고,
+    비어 있지 않은 기존 값은 덮지 않으며 기존 컨을 지우지도 않는다. completed 는 무접촉.
   · 방향 필터로 전량 제외되면 PUT 자체를 하지 않는다 — 빈 PUT 은 RTDB 에서 '노드 삭제'다.
   · None(null) 을 절대 보내지 않는다 — RTDB 에서 null 은 '지우기'다.
   · 좌표(bay/row/tier…)는 PUT 전에 기존 노드에서 물려받는다 — 사람이 맞춘 자리를 지우지 않는다.
@@ -26,7 +28,8 @@ import time
 import berth_schedule as bsch                       # 0.6 — 터미널 선석배정(항차의 진실)
 import edi_parser as ep
 
-STATE_V = 1                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
+STATE_V = 2                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
+                                  #   1→2 : 0.9 리스트(records) 업로드가 붙었다.
 PARSER_TAG = "MailPilot Uni 0.7 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
@@ -660,6 +663,285 @@ def upload_mode(firebase, key, mode, cand, aliases, log):
     return len(kept), ok
 
 
+# ──────────────────── ㉰-2 리스트 자동 업로드(0.9) ────────────────────
+#
+# 항차 폴더의 엑셀 리스트(선사 CLL·CDL·세관 CDL·중국어)를 읽어 `voyages/{키}/{방향}/records` 에
+# 올린다. 앱의 매칭·누락 화면이 records 를 읽으므로, 이것이 없으면 EDI 만 있는 항차는
+# 실번호·무게·온도가 비어 있다.
+#
+# ⛔ 현장 계약(사용자 확정) — **검수원이 이미 넣은 값은 단 한 바이트도 바뀌지 않는다.**
+#   · 새 컨은 더한다. 기존 컨은 **빈 칸("" · 0 · 없음)만** 채운다.
+#   · 비어 있지 않은 기존 값은 절대 덮지 않는다(다르면 로그로만 남긴다).
+#   · 기존 컨을 지우지 않는다(v1 무삭제). 리스트에서 빠진 컨도 그대로 둔다.
+#   · 기존 노드를 못 읽으면(GET 실패) **아무것도 올리지 않는다** — 통째 PUT 은 되덮기다.
+#   · 바뀐 것이 없으면 PUT 자체를 하지 않는다(사이클마다 같은 쓰기 반복 없음).
+#
+# 판독은 list_parser(검수앱 utils.js parseListExcel 이식본)가 소유한다 — 여기서 다시 파싱하지 않는다.
+
+_LP_MOD = [None, ""]                  # [모듈, 실패사유] — 지연 임포트 결과를 한 번만 기억한다
+
+
+def list_parser_mod():
+    """리스트 판독 모듈을 늦게 부른다. 없으면 (None, 사유) — 리스트 단계만 건너뛰기 위함."""
+    if _LP_MOD[0] is None and not _LP_MOD[1]:
+        try:
+            import list_parser
+            _LP_MOD[0] = list_parser
+        except Exception as exc:                      # 조용한 실패 금지 — 사유를 그대로 남긴다
+            _LP_MOD[1] = "%s: %s" % (type(exc).__name__, exc)
+    return _LP_MOD[0], _LP_MOD[1]
+
+
+# 개정 서열 마커(파일명) — 최종/FINAL > REVISED/수정 > n차 > 무표시.
+#   '_REV 1' 처럼 밑줄에 붙어 오는 표기가 있어 \b 대신 영문자 경계를 직접 쓴다.
+_MARK_FINAL = re.compile(r"(?<![A-Za-z])FINAL(?![A-Za-z])|최종", re.I)
+_MARK_REVISED = re.compile(r"(?<![A-Za-z])REV(?:\.|ISED|ISION)?(?![A-Za-z])|수정", re.I)
+_MARK_NTH = re.compile(r"([0-9]{1,2})\s*차")
+
+RANK_FINAL, RANK_REVISED, RANK_NTH, RANK_PLAIN = 400, 300, 200, 100
+
+# 파일명 방향 힌트 — 내용(홈포트 POL/POD)으로 못 가릴 때만 쓴다.
+_HINT_DIS = re.compile(r"(?<![A-Z])CDL(?![A-Z])|DISCH", re.I)
+_HINT_LOAD = re.compile(r"(?<![A-Z])CLL(?![A-Z])|LOAD", re.I)
+
+# 값이 0 이면 '그 열이 없었다'는 뜻인 필드(검수앱 firebase.js _ZERO_IS_EMPTY 와 같은 정신).
+#   ⚠ 참/거짓(False)은 빈 값이 아니다 — dg/rf 의 False 는 '아니다'라는 판정값이다.
+LIST_PAIR_FIELDS = (("sl", "sl_orig"), ("eseal", "eseal_orig"))
+
+# 값이 서로 다르면 로그로 남길 필드(덮지는 않는다) — 실번호가 대표다.
+LIST_CONFLICT_FIELDS = ("sl", "eseal", "iso", "fe", "wt", "pol", "pod", "bl")
+
+# 충돌 로그 상한 — 한 항차가 사이클 로그를 뒤덮지 않게. 넘치면 몇 건이 더 있는지 남긴다.
+#   (실측: XTPG 535E 는 리스트 3장 사이에 'PTK↔KRPTK'·'45G0↔45GP' 표기 차이만 72건이다.)
+LIST_CONFLICT_LOG_MAX = 10
+
+
+def list_rank(name):
+    """파일명 개정 마커 → 서열 점수(클수록 새 판). 같은 점수는 mtime 최신이 이긴다."""
+    text = str(name or "")
+    if _MARK_FINAL.search(text):
+        return RANK_FINAL
+    if _MARK_REVISED.search(text):
+        return RANK_REVISED
+    nth = _MARK_NTH.search(text)
+    if nth:
+        return RANK_NTH + min(int(nth.group(1)), 99)
+    return RANK_PLAIN
+
+
+def list_mode(dis_home, load_home, name):
+    """이 리스트가 어느 방향인가. 'discharge' · 'loading' · ''(가릴 수 없음).
+
+    ① 내용이 먼저다 — 홈포트 POD 가 많으면 양하, POL 이 많으면 선적.
+       (실증: 'XINQUNDAO 2629W DIS LIST AFTER KRPTK.XLS' 는 이름이 DIS 인데 내용은 선적분이다.)
+    ② 동수·판정 불가면 파일명 힌트(CDL/DISCH=양하 · CLL/LOAD=선적).
+    ③ 그래도 불명이면 ''를 돌려준다 — **넘겨짚지 않고 건너뛴다.**
+       (실증: 'SWSP 2606N (Excel).xls' 는 폴더가 2606N(양하)인데 검수사는 선적에 올렸다.
+        폴더 방향을 힌트로 쓰면 반대로 올라간다 — 그래서 폴더는 근거로 쓰지 않는다.)
+    """
+    if dis_home > load_home:
+        return "discharge"
+    if load_home > dis_home:
+        return "loading"
+    dis_hint = bool(_HINT_DIS.search(str(name or "")))
+    load_hint = bool(_HINT_LOAD.search(str(name or "")))
+    if dis_hint and not load_hint:
+        return "discharge"
+    if load_hint and not dis_hint:
+        return "loading"
+    return ""
+
+
+def _list_empty(value):
+    """리스트 병합에서 '빈 칸'인가 — 없음(None) · 빈 문자열 · 숫자 0.
+    참/거짓은 빈 칸이 아니다(False 는 '아니다'라는 값이다)."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (int, float)):
+        return value == 0
+    return False
+
+
+def _fix_seal_pairs(rec):
+    """실번호 짝(sl/sl_orig · eseal/eseal_orig)을 어긋나지 않게 맞춘다.
+
+    한쪽만 채우면 `sl ≠ sl_orig` 가 되어 앱이 **실오류(세관 신고 대상)** 로 띄운다
+    (검수앱 1.8-02 사고와 같은 자리). 원본이 비어 있으면 현재 값을 원본으로 삼는다.
+    """
+    for base, orig in LIST_PAIR_FIELDS:
+        if not _list_empty(rec.get(base)) and _list_empty(rec.get(orig)):
+            rec[orig] = rec[base]
+    return rec
+
+
+def merge_list_files(files, log=None):
+    """개정 서열 높은 순으로 리스트들을 한 장으로 합친다 — 먼저 온 값이 이긴다.
+
+    files: [{"name","rank","mtime","records":[...]}] (정렬 전). 돌려주는 값: ({컨:레코드}, 충돌수)
+    같은 (컨·필드)에 서로 다른 값이 있으면 **낮은 서열이 덮지 못하고** 로그로만 남는다.
+    """
+    order = sorted(files, key=lambda f: (f["rank"], f["mtime"], f["name"]), reverse=True)
+    out, conflicts = {}, 0
+    for item in order:
+        for rec in item.get("records") or []:
+            cn = str(rec.get("cn") or "").strip().upper()
+            if not cn:
+                continue
+            if cn not in out:
+                out[cn] = dict(rec)
+                continue
+            cur = out[cn]
+            for field, value in rec.items():
+                if _list_empty(value):
+                    continue
+                if _list_empty(cur.get(field)):
+                    cur[field] = value
+                elif field in LIST_CONFLICT_FIELDS and \
+                        str(cur[field]).strip() != str(value).strip():
+                    conflicts += 1
+                    if log and conflicts <= LIST_CONFLICT_LOG_MAX:
+                        log("    ⚠ 리스트 충돌 %s %s: %r(서열 높음) ↔ %r(%s) — 덮지 않습니다"
+                            % (cn, field, cur[field], value, item["name"]))
+    if log and conflicts > LIST_CONFLICT_LOG_MAX:
+        log("    ⚠ 리스트 충돌 %d건 더 있습니다(같은 종류) — 모두 덮지 않았습니다"
+            % (conflicts - LIST_CONFLICT_LOG_MAX))
+    for cn, rec in out.items():
+        _fix_seal_pairs(rec)
+        if not rec.get("l4") and len(cn) >= 4:
+            rec["l4"] = cn[-4:]
+    return out, conflicts
+
+
+def merge_into_records(old, new, log=None, mode=""):
+    """보수 머지 — 새 컨은 더하고, 기존 컨은 **빈 칸만** 채운다. 삭제·덮어쓰기 없음.
+
+    돌려주는 값: (병합결과, 새 컨 수, 빈칸 채운 컨 수, 충돌 수)
+    """
+    out = json.loads(json.dumps(old or {}, ensure_ascii=False))
+    added = filled = conflicts = 0
+    for cn, rec in (new or {}).items():
+        prev = out.get(cn)
+        if prev is None:
+            out[cn] = _fix_seal_pairs(dict(rec))
+            added += 1
+            continue
+        if not isinstance(prev, dict):                # 모양이 다른 기존 값은 손대지 않는다
+            if log:
+                log("    ⚠ %s %s 기존 값이 사전이 아니어서 건너뜁니다(무접촉)" % (mode, cn))
+            continue
+        cur = dict(prev)
+        touched_base = set()
+        for field, value in rec.items():
+            if _list_empty(value):
+                continue
+            if field in ("sl_orig", "eseal_orig"):    # 짝 필드는 아래에서 짝으로만 다룬다
+                continue
+            if _list_empty(cur.get(field)):
+                cur[field] = value
+                touched_base.add(field)
+            elif field in LIST_CONFLICT_FIELDS and \
+                    str(cur[field]).strip() != str(value).strip():
+                conflicts += 1
+                if log and conflicts <= LIST_CONFLICT_LOG_MAX:
+                    log("    ⚠ 기존값 충돌 %s %s %s: 기존 %r ↔ 리스트 %r — 기존을 지킵니다"
+                        % (mode, cn, field, cur[field], value))
+        for base, orig in LIST_PAIR_FIELDS:           # sl 을 채웠으면 sl_orig 도 짝으로 채운다
+            if base in touched_base:
+                cur[orig] = rec.get(orig) if not _list_empty(rec.get(orig)) else cur[base]
+            elif not _list_empty(cur.get(base)) and _list_empty(cur.get(orig)):
+                cur[orig] = cur[base]                 # 한쪽만 있으면 실오류로 오인된다
+        if "tmp" in touched_base and cur.get("tmp_missing") is True:
+            cur["tmp_missing"] = False                # 온도가 채워졌으면 '온도 없음'을 푼다
+        if cur != prev:
+            out[cn] = cur
+            filled += 1
+    if log and conflicts > LIST_CONFLICT_LOG_MAX:
+        log("    ⚠ %s 기존값 충돌 %d건 더 있습니다(같은 종류) — 기존을 모두 지켰습니다"
+            % (mode, conflicts - LIST_CONFLICT_LOG_MAX))
+    return out, added, filled, conflicts
+
+
+def scan_lists(folder, names, aliases, log, folder_dir=""):
+    """폴더의 리스트 엑셀을 전부 읽어 판독한다 — [{"name","rank","mtime","mode","records"}].
+    report(마감텔리·베이플랜)·XRAY·합본은 detect_list_kind 가 걸러 낸다."""
+    lp, why = list_parser_mod()
+    if lp is None:
+        log("    ⚠ 리스트 판독 모듈을 부르지 못해 리스트 단계를 건너뜁니다 — %s" % why)
+        return []
+    out = []
+    for name in sorted(names):
+        if lp.detect_list_kind(name) != "list":       # 값싼 이름 게이트(확장자·report·xray·합본)
+            continue
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError as exc:
+            log("    리스트를 읽지 못했습니다(%s): %s" % (name, exc))
+            continue
+        sheets, err = lp.read_sheets(data, name)
+        if err:                                       # 의존성 부재·HTML 위장 등 — 사유를 남긴다
+            log("    리스트 판독 건너뜀(%s): %s" % (name, err))
+            continue
+        if lp.detect_list_kind(name, sheets) != "list":
+            continue                                  # 내용에 리스트 시트가 없다(요약표 등)
+        try:
+            parsed = lp.parse_list_sheets(sheets, source=name)
+        except Exception as exc:                      # 한 파일이 깨져도 폴더 전체를 죽이지 않는다
+            log("    리스트 판독 실패(%s) %s: %s" % (name, type(exc).__name__, exc))
+            continue
+        recs = (parsed or {}).get("records") or []
+        if not recs:
+            continue
+        dis_home = sum(1 for r in recs if is_home_port(r.get("pod"), aliases))
+        load_home = sum(1 for r in recs if is_home_port(r.get("pol"), aliases))
+        mode = list_mode(dis_home, load_home, name)
+        if not mode:
+            log("    ⤫ 리스트 방향을 가릴 수 없어 건너뜁니다: %s (컨 %d · 홈 POD %d · POL %d)"
+                % (name, len(recs), dis_home, load_home))
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        out.append({"name": name, "rank": list_rank(name), "mtime": mtime,
+                    "mode": mode, "records": recs, "folder_dir": folder_dir})
+    return out
+
+
+def upload_lists(firebase, key, mode, files, log):
+    """한 방향 records 를 보수 머지로 올린다. (새 컨, 빈칸 채움, 충돌, 성공여부)."""
+    new, conflicts = merge_list_files(files, log)
+    if not new:
+        return 0, 0, conflicts, True
+    path = "voyages/%s/%s/records" % (key, mode)
+    try:
+        old = firebase.get(path)
+    except Exception as exc:                          # 조용한 실패 금지 — 못 읽으면 올리지 않는다
+        log("    ✗ %s 기존 records 를 읽지 못해 리스트를 올리지 않습니다(%s: %s)"
+            % (mode, type(exc).__name__, exc))
+        return 0, 0, conflicts, False
+    if old is not None and not isinstance(old, dict):
+        log("    ✗ %s 기존 records 모양이 사전이 아닙니다 — 손대지 않습니다(%s)" % (mode, type(old).__name__))
+        return 0, 0, conflicts, False
+    merged, added, filled, more = merge_into_records(old or {}, new, log, mode)
+    conflicts += more
+    if merged == (old or {}):
+        return 0, 0, conflicts, True                  # 바뀐 것이 없으면 쓰지 않는다
+    if firebase.put(path, strip_nulls(merged)) is None:
+        log("    ✗ %s 리스트 업로드 실패 — 다음 사이클에 다시 시도합니다." % mode)
+        return 0, 0, conflicts, False
+    log("    ↑ 리스트 올림: %s %s 추가 %d·빈칸 채움 %d·충돌 %d (%s)"
+        % (key, mode, added, filled, conflicts,
+           ", ".join(f["name"] for f in sorted(files, key=lambda f: (f["rank"], f["mtime"]),
+                                               reverse=True))))
+    return added, filled, conflicts, True
+
+
 # ──────────────────────────── ㉱ 백필 스캔 ────────────────────────────
 
 def voyage_folders(root, cache, master, log):
@@ -715,7 +997,10 @@ def voyage_folders(root, cache, master, log):
 
 def handle_group(firebase, code, key_voy, members, voy_d, voy_l, aliases, log, index=None,
                  plan_row=None):
-    """한 항차(폴더 한 묶음) — 항차 등록 + 방향별 대표 EDI 업로드. (키, 올린 대수 합)."""
+    """한 항차(폴더 한 묶음) — 항차 등록 + 방향별 대표 EDI + 리스트(records) 업로드.
+
+    돌려주는 값: (키, 올린 EDI 대수 합, 성공여부, 리스트 통계)
+    """
     other = [v for v, _p, _n in members] + [v for v in (voy_d, voy_l) if v]
     key, key_voy = resolve_key(firebase, code, key_voy, other, index)
     if index is not None:                               # 이번 판에서 새로 만든 키도 다음 묶음이 본다
@@ -724,24 +1009,40 @@ def handle_group(firebase, code, key_voy, members, voy_d, voy_l, aliases, log, i
         % (code, "+".join(v for v, _p, _n in members), key, voy_d or "-", voy_l or "-"))
     ok = register_voyage(firebase, key, code, key_voy, voy_d, voy_l, log, plan_row)
 
-    cands = []
+    stats = {"added": 0, "filled": 0, "conflicts": 0, "files": 0, "modes": []}
+    cands, lists = [], []
     for voy, path, names in members:
         cands += scan_candidates(path, names, aliases, log, voy_direction(voy))
-    if not cands:
-        return key, 0, ok
-    best = pick_representatives(cands, log)
+        lists += scan_lists(path, names, aliases, log, voy_direction(voy))
+
     uploaded = 0
+    if cands:
+        best = pick_representatives(cands, log)
+        for mode in ("discharge", "loading"):
+            cand = best.get(mode)
+            if cand is None:
+                continue
+            if mode != cand.get("folder_dir"):
+                log("    ↔ 폴더 방향(%s)과 내용이 달라 %s 노드에 올립니다: %s"
+                    % (cand.get("folder_dir") or "?", mode, cand["name"]))
+            count, sent = upload_mode(firebase, key, mode, cand, aliases, log)
+            uploaded += count
+            ok = ok and sent
+
+    # 0.9 — 리스트(records). EDI 와 독립이다: EDI 가 없어도 리스트만으로 매칭이 산다.
     for mode in ("discharge", "loading"):
-        cand = best.get(mode)
-        if cand is None:
+        files = [f for f in lists if f["mode"] == mode]
+        if not files:
             continue
-        if mode != cand.get("folder_dir"):
-            log("    ↔ 폴더 방향(%s)과 내용이 달라 %s 노드에 올립니다: %s"
-                % (cand.get("folder_dir") or "?", mode, cand["name"]))
-        count, sent = upload_mode(firebase, key, mode, cand, aliases, log)
-        uploaded += count
+        stats["files"] += len(files)
+        added, filled, conflicts, sent = upload_lists(firebase, key, mode, files, log)
+        stats["added"] += added
+        stats["filled"] += filled
+        stats["conflicts"] += conflicts
+        if added or filled:
+            stats["modes"].append("%s/%s" % (key, mode))
         ok = ok and sent
-    return key, uploaded, ok
+    return key, uploaded, ok, stats
 
 
 # ──────────────── ㉲ 기동 시 1회 — 항차 표기 병합 마이그레이션(0.5-01) ────────────────
@@ -1471,7 +1772,8 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
     """
     result = {"folders": 0, "voyages": 0, "changed": 0, "skipped": 0, "uploads": 0,
               "errors": 0, "registered": [], "pairs": 0, "blocked": [], "plan": 0,
-              "planReconciled": False, "expected": [], "retired": []}
+              "planReconciled": False, "expected": [], "retired": [],
+              "lists": [], "listAdded": 0, "listFilled": 0, "listConflicts": 0, "listFiles": 0}
     if firebase is None or not getattr(firebase, "enabled", False):
         log("파이어베이스 미설정 — 앱 채우기(항차·EDI 등록)를 건너뜁니다.")
         return result
@@ -1545,12 +1847,19 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
             continue
         result["changed"] += 1
         try:
-            key, uploaded, sent = handle_group(firebase, code, key_voy, members,
-                                               voy_d, voy_l, aliases, log, index, plan_row)
+            key, uploaded, sent, lstat = handle_group(firebase, code, key_voy, members,
+                                                      voy_d, voy_l, aliases, log, index, plan_row)
         except Exception as exc:                        # 항차 하나가 죽어도 사이클은 계속된다
             log("  앱 채우기 실패 %s (%s: %s)" % (rel, type(exc).__name__, exc))
             result["errors"] += 1
             continue
+        result["listAdded"] += lstat["added"]
+        result["listFilled"] += lstat["filled"]
+        result["listConflicts"] += lstat["conflicts"]
+        result["listFiles"] += lstat["files"]
+        for node in lstat["modes"]:
+            if node not in result["lists"]:
+                result["lists"].append(node)
         if sent:                                        # 실패한 항차는 지문을 남기지 않는다(다음에 재시도)
             state["folders"][rel] = {"fp": fingerprint, "key": key, "at": _now_ms()}
         else:
@@ -1560,6 +1869,10 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
             result["registered"].append(key)
 
     save_state(state, state_path, log)
+    if result["lists"] or result["listConflicts"]:
+        log("앱 채우기 — 리스트 %d장으로 records 채움: 새 컨 %d · 빈칸 채운 컨 %d · 충돌 %d (%s)"
+            % (result["listFiles"], result["listAdded"], result["listFilled"],
+               result["listConflicts"], ", ".join(result["lists"]) or "-"))
     if result["blocked"]:
         log("앱 채우기 — 배정표 게이트로 새 카드를 만들지 않은 항차 %d개: %s"
             % (len(result["blocked"]), ", ".join(result["blocked"])))

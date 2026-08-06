@@ -41,6 +41,13 @@
  28) 0.8 화면 개편 — 좌측 메뉴(여섯 절)·우측 수집 기록 골격 · 절 전환 · 기능 위젯 보존 ·
      [정본으로 승인](파일 추가·별칭 보존·중복 방지·확인창 '아니오') · 선석배정 상태 표시 ·
      --autostart 예약 경로 불변
+ 30) 0.9 리스트 자동 업로드(app_upload) — 개정 서열(최종>수정>n차>무표시) · 방향 판정
+     (내용>파일명>건너뜀) · 보수 머지(기존 값 불변·빈칸만·새 컨 추가·무삭제·멱등) ·
+     검수원 입력 보호(rfSet·sl 수정 위에 재업로드 → 전값 불변) · GET 실패 시 PUT 0 ·
+     의존성 부재 시 건너뜀 · 실파일 종단(미니 메일박스 → records 가 JS 정답표와 일치)
+ 29) 0.9 리스트 엑셀 판독 모듈(list_parser) — 파일 종류 판정 · 표준/세관CDL/중국어/SOC 갈래 ·
+     규격·풀공 판정표 · SheetJS 숫자 서식 재현 · 실파일 픽스처 8종 컨 단위 전 필드 스냅샷
+     (기대값 정본은 검수앱 src/utils.js parseListExcel 을 node 로 돌린 결과)
 """
 
 import datetime
@@ -3608,6 +3615,512 @@ def _state(path):
         return set()
 
 
+# ────────────────────── 29) 리스트 엑셀 판독 모듈 — 4갈래 · 실파일 스냅샷 ──────────────────────
+#   정답표: tests/fixtures/list_expected.json — 검수앱 src/utils.js parseListExcel 을
+#   node(SheetJS)로 돌린 결과 그대로다. 파이썬 이식본이 컨 단위 전 필드에서 같아야 PASS.
+
+# 합성 리스트 격자(엑셀 없이 파서 본체만 확인) — fixtures/list_synth.xlsx 와 같은 내용.
+LIST_SYNTH_HDR = [
+    "CNTR NO.", "SEAL NO.", "엠티실번호", "Tp/Sz", "Size", "F/E", "Weight", "POL", "POD",
+    "OPR", "TEMP", "REMARK", "ITEM", "B/L No.", "Shipper", "Gate In", "TS PORT",
+    "PrintPOD", "Cargo Type", "DG",
+]
+LIST_SYNTH_STD = [
+    ["제목 줄 — 헤더 앞 잡음"],
+    LIST_SYNTH_HDR,
+    ["ABCU1234567", "SL0001", "", "DC20", "", "F", "12,340", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL001", "한울", "07-01", "", "", "FULL", "N"],
+    ["ABCU1234568", "SL0002", "", "DC20", "", "E", "2,300", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL002"],
+    ["ABCU1234569", "SL0003", "", "RFHC", "", "", "25,000", "KRPTK", "CNSHA", "SKR",
+     "-18", "", "", "BL003"],
+    ["ABCU1234570", "", "", "RFHC", "", "R/D", "3,000", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL004"],
+    ["ABCU1234571", "SL0005", "", "4HDC", "", "F", "20,000", "KRPTK", "CNSHA", "SKR",
+     "", "IMDG 9 UN_CD 3480 RF +23 특수 제작", "", "BL005"],
+    ["", "ABCU1234572", "", "DC20", "", "F", "9,000", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL006"],
+    ["ABCU1234573", "SL0007", "ESL07", "DC20", "", "E", "2,200", "KRPTK", "CNSHA", "SKR",
+     "", "", "공컨테이너", "BL007"],
+    ["ABCU1234574", "SL0008", "", "", "20F", "", "2,400", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL008"],
+    ["ABCU1234575", "SL0009", "", "22GPE", "", "", "2,500", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL009"],
+    ["ABCU1234576", "SL0010", "", "40FR", "", "F", "18,000", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL010"],
+    ["ABCU1234577", "SL0011", "", "40TK", "", "F", "18,000", "KRPTK", "CNSHA", "SKR",
+     "", "", "", "BL011"],
+]
+LIST_SYNTH_SOC = [
+    ["SOC NO. LIST"],
+    ["Container", "Seal", "Tp/Sz", "L/S"],
+    ["SOCU0000010", "SS0001", "DC20", "S"],
+    ["SOCU0000021", "", "DC20", "S"],
+]
+LIST_SYNTH_MEMO = [["작업 메모"], ["ZZZU9999990"], [""]]
+
+
+def _lp_pad(grid):
+    """SheetJS 는 시트 폭만큼 빈칸을 채운 격자를 준다 — 같은 모양으로 맞춘다."""
+    width = max(len(r) for r in grid)
+    return [list(r) + [""] * (width - len(r)) for r in grid]
+
+
+def _lp_diff(expected, actual, source):
+    """기대 레코드(JS) 와 실제 레코드(PY) 를 컨 단위 전 필드로 대조 — 어긋난 자리 목록."""
+    out = []
+    if len(expected) != len(actual):
+        return ["컨 수 %d != %d" % (len(expected), len(actual))]
+    for i in range(len(expected)):
+        want = dict(expected[i])
+        got = dict(actual[i])
+        src = got.pop("_source", None)
+        if source is not None and src != source:
+            out.append("[%d] _source %r != %r" % (i, src, source))
+        for key in sorted(set(want) | set(got)):
+            a = want.get(key, "<없음>")
+            b = got.get(key, "<없음>")
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)) \
+                    and not isinstance(a, bool) and not isinstance(b, bool):
+                same = float(a) == float(b)
+            else:
+                same = a == b
+            if not same:
+                out.append("[%d] %s %s: %r != %r" % (i, want.get("cn", "?"), key, a, b))
+    return out
+
+
+def test_list_parser():
+    print("\n[29] 리스트 엑셀 판독 모듈 — 표준/세관CDL/중국어/SOC · 실파일 스냅샷")
+    try:
+        import list_parser as lp
+    except Exception as exc:
+        check("list_parser 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+
+    # (1) 지연 임포트 — 없으면 사유 문자열을 돌려준다(조용한 실패 금지)
+    dep = lp.excel_deps_status()
+    check("의존성 상태 — openpyxl·xlrd 두 열쇠", set(dep) == {"openpyxl", "xlrd"}, repr(dep))
+    have_xlsx = lp._load_openpyxl()[0] is not None
+    have_xls = lp._load_xlrd()[0] is not None
+    if not have_xlsx:
+        check("openpyxl 없을 때 사유 문자열", "openpyxl이 없습니다" in str(dep["openpyxl"]))
+    if not have_xls:
+        check("xlrd 없을 때 사유 문자열", "xlrd가 없습니다" in str(dep["xlrd"]))
+
+    # (2) 파일 종류 판정 — 리스트 후보만. XRAY·합본·마감텔리·플랜은 뺀다.
+    kinds = [
+        ("ATPR ( 2632E ) CLL.xlsx", "list"),
+        ("DJCO 0216W CDL.xls", "list"),
+        ("검수업체컨테이너목록조회_20260726.xls", "list"),
+        ("船代出口预配.xlsx", "list"),
+        ("2632WLOADLIST.xlsx", "merged"),
+        ("STMJ 2639E XRAY LIST.xlsx", "xray"),
+        ("PTK X-RAY 대상.xls", "xray"),
+        ("ATPR 2632W PTK TALLY REPORT.xlsx", "report"),
+        ("DXQD 2627W PTK BAY PLAN.xlsx", "report"),
+        ("OBWH 2680W PTK LOADING SUMMARY.xlsx", "report"),
+        ("JDJC0222W_RECAP.xlsx", "skip"),
+        ("XTI 0534W MEMO BL.xls", "skip"),
+        ("DXQD 2627W PTK BAY PLAN.pdf", "skip"),
+        ("DJCT0220WPTK.EDI", "skip"),
+        ("ATPR 2632W PTK.ASC", "skip"),
+    ]
+    bad = [(n, want, lp.detect_list_kind(n)) for n, want in kinds
+           if lp.detect_list_kind(n) != want]
+    check("파일 종류 판정 15종 — 리스트만 통과", not bad, repr(bad[:3]))
+
+    # (3) 시트 갈래 판정
+    check("시트 갈래 — 표준", lp.detect_sheet_format(_lp_pad(LIST_SYNTH_STD)) == "standard")
+    check("시트 갈래 — 세관 CDL",
+          lp.detect_sheet_format([["컨테이너번호", "B/L TYPE", "규격"], ["ABCU1234567", "C", "22GP"]])
+          == "customs")
+    check("시트 갈래 — 중국어(RIZHAO)",
+          lp.detect_sheet_format([[""], [""], [""], [""], [""],
+                                  ["提单号", "箱号", "箱量"], ["BL", "ABCU1234567", "20GP*1"]])
+          == "rizhao")
+    check("시트 갈래 — 리스트 아님", lp.detect_sheet_format([["합계"], ["12"]]) == "none")
+
+    # (4) 하위 함수 — 정본(utils.js)의 규격·풀공 판정표
+    iso_tab = [
+        (("", "DC20"), "22G1"), (("", "DCHC"), ""), (("20", "DC"), "22G1"),
+        (("4H", "RF"), "45R1"), (("", "D5"), "45G1"), (("", "R5"), "45R1"),
+        (("", "4HDC"), "45G1"), (("", "5R"), "45R1"), (("", "2D"), "22G1"),
+        (("", "40'H"), "45G1"), (("", "20'D"), "22G1"), (("", "45'H"), "L5G1"),
+        (("", "22G1"), "22G1"), (("", "DC43"), "45G1"),
+        # '43DC' 는 표준 ISO 꼴(\d\d[A-Z][A-Z])에 먼저 걸려 그대로 남는다 — 검수앱과 같은 값.
+        (("", "43DC"), "43DC"),
+    ]
+    bad = [(a, w, lp.derive_iso(*a)) for a, w in iso_tab if lp.derive_iso(*a) != w]
+    check("derive_iso 15종 — 선사별 규격 표기", not bad, repr(bad[:3]))
+    fe_tab = [("R/F", "F"), ("R/E", "E"), ("R/D", "D"), ("RE", "E"), ("RD", "D"),
+              ("D-F", "F"), ("45RE", ""), ("22R1", ""), ("", "")]
+    bad = [(a, w, lp.fe_from_slash(a)) for a, w in fe_tab if lp.fe_from_slash(a) != w]
+    check("fe_from_slash 9종 — R/F·R/E·R/D", not bad, repr(bad[:3]))
+    check("norm_header — 점·괄호·공백 정리",
+          lp.norm_header(" Cntr. No. (B) ") == "cntr no b")
+    check("is_reefer_iso — FR 오탐 없음",
+          lp.is_reefer_iso("45R1") and lp.is_reefer_iso("40RH")
+          and not lp.is_reefer_iso("40FR") and not lp.is_reefer_iso("4583"))
+
+    # (5) SheetJS 숫자 서식 재현 — 실파일에서 나온 서식만
+    ssf = [
+        (2830, "#,##0_ ", "2,830 "),
+        (28600, "General", "28600"),
+        (17862.0, "###,###,###,##0.0#_ ", "17,862.0 "),
+        (2.95, "[$-10804]0.00", "$2.95"),
+        (17808, "#,##0.00", "17,808.00"),
+        (-1234, "#,##0_);[Red]\\(#,##0\\)", "(1,234)"),
+        (0, "0_ ", "0 "),
+    ]
+    bad = [(v, f, w, lp._ssf_format(v, f)) for v, f, w in ssf if lp._ssf_format(v, f) != w]
+    check("숫자 서식 7종 — SheetJS w 문자열과 같음", not bad, repr(bad[:3]))
+
+    # (6) 정답표 불러오기
+    fx = os.path.join(HERE, "fixtures")
+    try:
+        with open(os.path.join(fx, "list_expected.json"), "r", encoding="utf-8") as fh:
+            expected = json.load(fh)["표본"]
+    except (OSError, ValueError) as exc:
+        check("정답표(list_expected.json) 읽기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+    check("정답표 8파일", len(expected) == 8, repr(sorted(expected)))
+
+    # (7) 격자 직판독 — 엑셀 라이브러리 없이 파서 본체만 (합성 리스트)
+    sheets = [("STD", _lp_pad(LIST_SYNTH_STD)), ("SOC", _lp_pad(LIST_SYNTH_SOC)),
+              ("MEMO", _lp_pad(LIST_SYNTH_MEMO))]
+    got = lp.parse_list_sheets(sheets, source="list_synth.xlsx")
+    want = expected["list_synth.xlsx"]["records"]
+    diff = _lp_diff(want, got["records"], "list_synth.xlsx")
+    check("합성 격자 — 컨 12대 전 필드 일치(검수앱과 같음)", not diff, "; ".join(diff[:3]))
+    by_cn = dict((r["cn"], r) for r in got["records"])
+    check("F/E 열 — 풀/공", by_cn["ABCU1234567"]["fe"] == "F"
+          and by_cn["ABCU1234568"]["fe"] == "E")
+    check("ISO 끝자리 동기화 — 공이면 끝자리 E", by_cn["ABCU1234568"]["iso"] == "22GE")
+    check("온도가 적혔으면 풀 리퍼",
+          by_cn["ABCU1234569"]["fe"] == "F" and by_cn["ABCU1234569"]["rf"] is True
+          and by_cn["ABCU1234569"]["tmp"] == "-18")
+    check("R/D — 리퍼드라이 표시(참일 때만 넣는다)",
+          by_cn["ABCU1234570"].get("rfdry") is True
+          and "rfdry" not in by_cn["ABCU1234567"])
+    check("REMARK — IMDG/UN/온도/제작컨",
+          by_cn["ABCU1234571"]["dg"] is True and by_cn["ABCU1234571"]["dgc"] == "9"
+          and by_cn["ABCU1234571"]["un"] == "3480"
+          and by_cn["ABCU1234571"]["tmp"] == "23"
+          and by_cn["ABCU1234571"]["mkcon"] is True)
+    check("ITEM '공컨테이너' — 공 판정 + 엠티실 별도 열",
+          by_cn["ABCU1234573"]["fe"] == "E" and by_cn["ABCU1234573"]["eseal"] == "ESL07")
+    check("무게 — 쉼표 제거 후 정수", by_cn["ABCU1234567"]["wt"] == 12340)
+    check("특수화물 — FR·TK 표시",
+          by_cn["ABCU1234576"]["fr"] is True and by_cn["ABCU1234577"]["tk"] is True)
+    check("SOC 양식 — 실 있으면 풀, 없으면 공",
+          by_cn["SOCU0000010"]["fe"] == "F" and by_cn["SOCU0000021"]["fe"] == "E")
+    check("실번호 열의 컨번호는 컨으로 줍지 않는다", "ABCU1234572" not in by_cn)
+    check("정식 시트가 있으면 메모 시트 셀스캔은 끈다", "ZZZU9999990" not in by_cn)
+    check("None 금지 — 빈 값은 ''·0·False",
+          all(v is not None for r in got["records"] for v in r.values()))
+
+    # (8) 실파일 픽스처 — 읽기 경로까지 포함한 종단 대조
+    files = [
+        ("list_synth.xlsx", "합성(.xlsx 읽기)", True),
+        ("list_cll_lugg.xlsx", "선사 CLL — 수화물 판별", True),
+        ("list_customs.xlsx", "세관 CDL(적하목록)", True),
+        ("list_rizhao.xlsx", "중국어 리스트(RIZHAO)", True),
+        ("list_std.xls", "선사 CLL(.xls BIFF)", False),
+        ("list_cll_csc.xls", "선사 CLL CSC(.xls BIFF)", False),
+        ("list_crownix.xls", "동진 EP LIST(.xls SST 보정 경로)", False),
+        ("list_named_xls.xls", "이름만 .xls 인 xlsx(매직바이트 판별)", True),
+    ]
+    for name, label, needs_xlsx in files:
+        if needs_xlsx and not have_xlsx:
+            check("픽스처 %s — %s" % (name, label), True, "openpyxl 없음 — 건너뜀")
+            continue
+        if not needs_xlsx and not have_xls:
+            check("픽스처 %s — %s" % (name, label), True, "xlrd 없음 — 건너뜀")
+            continue
+        out, err = lp.parse_list_excel(os.path.join(fx, name), name)
+        if err:
+            check("픽스처 %s — %s" % (name, label), False, err)
+            continue
+        want = expected[name]
+        diff = _lp_diff(want["records"], out["records"], name)
+        if want.get("luggCns", []) != out["lugg_cns"]:
+            diff.append("수화물 %r != %r" % (want.get("luggCns"), out["lugg_cns"]))
+        check("픽스처 %s — %s (컨 %d)" % (name, label, len(want["records"])),
+              not diff, "; ".join(diff[:3]))
+
+    # (9) 못 읽는 파일은 조용히 넘기지 않는다
+    out, err = lp.parse_list_excel(b"NOT-AN-EXCEL-FILE", "x.xlsx")
+    check("엑셀이 아니면 사유를 돌려준다", out is None and bool(err), str(err)[:60])
+
+
+# ────────────────────── 30) 0.9 리스트 자동 업로드 — records 보수 머지 ──────────────────────
+#
+#   현장 계약: **검수원이 이미 넣은 값은 단 한 바이트도 바뀌지 않는다.**
+#   그래서 이 절의 중심은 '무엇을 올리는가' 가 아니라 '무엇을 절대 안 건드리는가' 다.
+
+def _lp_fixture_records(name):
+    """정답표(JS 오라클)에서 한 파일의 records 를 꺼낸다 — 컨 사전으로."""
+    with open(os.path.join(HERE, "fixtures", "list_expected.json"), "r", encoding="utf-8") as fh:
+        table = json.load(fh)["표본"]
+    return dict((r["cn"], dict(r)) for r in table[name]["records"])
+
+
+def _lu_file(name, records, rank=None, mtime=0.0, mode="discharge"):
+    """scan_lists 가 내는 모양의 리스트 파일 한 장(병합 단위 시험용)."""
+    import app_upload as au
+    return {"name": name, "rank": au.list_rank(name) if rank is None else rank,
+            "mtime": mtime, "mode": mode, "records": records, "folder_dir": mode}
+
+
+def test_list_upload():
+    print("\n[30] 0.9 리스트 자동 업로드 — 개정 서열 · 방향 판정 · 보수 머지 · 검수원 보호")
+    try:
+        import app_upload as au
+        import list_parser as lp
+    except Exception as exc:
+        check("모듈 불러오기", False, "%s: %s" % (type(exc).__name__, exc))
+        return
+
+    # (1) 개정 서열 — 최종/FINAL > REVISED/수정 > n차 > 무표시 (실제 메일박스 파일명 그대로)
+    ranks = [
+        ("R082W_CLL Data 최종.xls", au.RANK_FINAL),
+        ("R082W_CLL Data 최종_REV 1.xls", au.RANK_FINAL),        # 최종이 먼저 걸린다(동순위는 mtime)
+        ("26354W 최종 리스트.xlsx", au.RANK_FINAL),
+        ("FINAL LOADING LIST.xls", au.RANK_FINAL),
+        ("RD-Loading List(R082W)_FIIS_REV 1.xls", au.RANK_REVISED),
+        ("REVISED CLL.xls", au.RANK_REVISED),
+        ("rzdf_ship_1785421739775 - 수정.xls", au.RANK_REVISED),
+        ("2706W CLL Data_vgm 3차.xls", au.RANK_NTH + 3),
+        ("2706W CLL Data_vgm 1차.xls", au.RANK_NTH + 1),
+        ("SWSP ( 2606N ) CLL.xlsx", au.RANK_PLAIN),
+        ("FINALLY DONE.xls", au.RANK_PLAIN),                      # 낱말이 아니면 안 걸린다
+        ("PREVIEW LIST.xls", au.RANK_PLAIN),                      # PREVIEW 의 REV 는 마커가 아니다
+    ]
+    bad = [(n, w, au.list_rank(n)) for n, w in ranks if au.list_rank(n) != w]
+    check("개정 서열 12종 — 최종>수정>n차>무표시", not bad, repr(bad[:3]))
+    check("서열 정렬 — 3차가 1차를 이기고, 수정이 3차를 이긴다",
+          au.list_rank("x 3차.xls") > au.list_rank("x 1차.xls")
+          and au.list_rank("x REV.xls") > au.list_rank("x 3차.xls")
+          and au.list_rank("x 최종.xls") > au.list_rank("x REV.xls"))
+
+    # (2) 방향 판정 — 내용이 먼저, 그 다음 파일명, 그래도 모르면 건너뛴다
+    modes = [
+        ((600, 0, "PCSZ 2623E CNTR LIST.xlsx"), "discharge"),
+        ((0, 345, "XINQUNDAO 2629W DIS LIST AFTER KRPTK.XLS"), "loading"),   # 내용 > 이름
+        ((395, 0, "SWDN ( 2608N ) CLL.xlsx"), "discharge"),                  # 내용 > CLL 이름
+        ((241, 0, "M.V.XINQUNDAO V.2630E DLC LOADING LIST.XLS"), "discharge"),
+        ((0, 0, "CDL PCSG 2639E CSC-DWS.xlsx"), "discharge"),                # 이름 힌트
+        ((0, 0, "PCSG 2640W CLL (CSC).xls"), "loading"),
+        ((0, 0, "RD-Loading List(R081W)_FIIS.xls"), "loading"),
+        ((0, 0, "MCAP-631S MAE EMPTY LOAD LIST.xlsx"), "loading"),
+        ((3, 3, "CDL 무엇.xlsx"), "discharge"),                              # 동수 → 이름 힌트
+        ((0, 0, "SWSP 2606N (Excel).xls"), ""),                              # 불명 → 건너뛴다
+        ((0, 0, "DXQD V-2630W EMPTY NOLIST.xlsx"), ""),
+        ((3, 3, "무엇.xlsx"), ""),
+        ((0, 0, "CDL 과 CLL 이 같이 든 이름.xls"), ""),                        # 양쪽 힌트 → 불명
+    ]
+    bad = [(a, w, au.list_mode(*a)) for a, w in modes if au.list_mode(*a) != w]
+    check("방향 판정 13종 — 내용>이름>건너뜀", not bad, repr(bad[:3]))
+    check("불명일 때 폴더 방향으로 넘겨짚지 않는다(SWSP 2606N 실사례)",
+          au.list_mode(0, 0, "SWSP 2606N (Excel).xls") == "")
+
+    # (3) 개정 서열 병합 — 높은 순위가 이기고, 낮은 순위는 빈칸만 메운다
+    hi = [{"cn": "AAAU1000001", "sl": "AAA111", "sl_orig": "AAA111", "wt": 12000,
+           "iso": "22G1", "tmp": "", "tmp_missing": False, "fe": "F"}]
+    lo = [{"cn": "AAAU1000001", "sl": "BBB222", "sl_orig": "BBB222", "wt": 0,
+           "iso": "", "tmp": "-18", "tmp_missing": True, "fe": "F"},
+          {"cn": "AAAU1000002", "sl": "CCC333", "sl_orig": "CCC333", "wt": 9000,
+           "iso": "45G1", "tmp": "", "tmp_missing": False, "fe": "E"}]
+    merged, conflicts = au.merge_list_files(
+        [_lu_file("리스트 1차.xls", lo, mtime=200.0), _lu_file("리스트 최종.xls", hi, mtime=100.0)],
+        _quiet)
+    a = merged.get("AAAU1000001") or {}
+    check("개정 병합 — 높은 서열의 실번호가 남는다(mtime 이 더 새 1차를 이긴다)",
+          a.get("sl") == "AAA111" and a.get("sl_orig") == "AAA111")
+    check("개정 병합 — 낮은 서열은 빈칸만 메운다(온도)", a.get("tmp") == "-18")
+    check("개정 병합 — 낮은 서열의 새 컨은 더한다", "AAAU1000002" in merged)
+    check("개정 병합 — 실번호 충돌은 로그로만(덮지 않음)", conflicts == 1, "충돌 %d" % conflicts)
+    same = au.merge_list_files([_lu_file("a.xls", hi, mtime=1.0),
+                               _lu_file("b.xls", [dict(hi[0])], mtime=2.0)], _quiet)
+    check("개정 병합 — 같은 값이면 충돌이 아니다", same[1] == 0)
+
+    # (4) 보수 머지 — 새 컨 추가 · 빈칸만 채움 · 기존 값 불변 · 무삭제
+    old = {
+        "AAAU1000001": {"cn": "AAAU1000001", "l4": "0001", "sl": "OLDSEAL", "sl_orig": "OLDSEAL",
+                        "eseal": "", "eseal_orig": "", "wt": 0, "tmp": "", "tmp_missing": True,
+                        "iso": "", "fe": "F", "rfSet": "-20", "rfCheckedBy": "성일",
+                        "sl_history": [{"from": "X", "to": "OLDSEAL"}]},
+        "ZZZU9999999": {"cn": "ZZZU9999999", "sl": "KEEPME", "wt": 100},   # 리스트에 없는 컨
+    }
+    new = {
+        "AAAU1000001": {"cn": "AAAU1000001", "l4": "0001", "sl": "NEWSEAL", "sl_orig": "NEWSEAL",
+                        "eseal": "", "eseal_orig": "", "wt": 14937, "tmp": "-18",
+                        "tmp_missing": True, "iso": "45R1", "fe": "F", "rf": True},
+        "BBBU2000002": {"cn": "BBBU2000002", "sl": "NEW222", "sl_orig": "NEW222", "wt": 8000},
+    }
+    out, added, filled, conf = au.merge_into_records(old, new, _quiet, "discharge")
+    a = out["AAAU1000001"]
+    check("보수 머지 — 비어 있지 않은 실번호는 절대 안 바뀐다",
+          a["sl"] == "OLDSEAL" and a["sl_orig"] == "OLDSEAL")
+    check("보수 머지 — 무게 0 은 빈칸이라 채운다", a["wt"] == 14937)
+    check("보수 머지 — 빈 규격·온도를 채운다", a["iso"] == "45R1" and a["tmp"] == "-18")
+    check("보수 머지 — 온도가 채워지면 tmp_missing 을 푼다", a["tmp_missing"] is False)
+    check("보수 머지 — 없던 필드는 더한다", a.get("rf") is True)
+    check("보수 머지 — 현장 입력(rfSet·이력)은 그대로", a["rfSet"] == "-20"
+          and a["sl_history"] == [{"from": "X", "to": "OLDSEAL"}] and a["rfCheckedBy"] == "성일")
+    check("보수 머지 — 새 컨은 더한다", "BBBU2000002" in out and added == 1)
+    check("보수 머지 — 리스트에 없는 기존 컨은 지우지 않는다(v1 무삭제)",
+          out["ZZZU9999999"] == old["ZZZU9999999"])
+    check("보수 머지 — 실번호 충돌은 세어 남긴다", conf == 1 and filled == 1)
+    check("보수 머지 — 참/거짓은 빈칸이 아니다(False 를 True 로 뒤집지 않는다)",
+          au.merge_into_records({"C": {"cn": "C", "dg": False, "rf": False}},
+                                {"C": {"cn": "C", "dg": True, "rf": True}}, _quiet)[0]["C"]
+          == {"cn": "C", "dg": False, "rf": False})
+    pair = au.merge_into_records(
+        {"D": {"cn": "D", "sl": "HAVE", "sl_orig": ""}},
+        {"D": {"cn": "D", "sl": "OTHER", "sl_orig": "OTHER"}}, _quiet)[0]["D"]
+    check("보수 머지 — sl 만 있고 sl_orig 가 비면 짝을 맞춘다(실오류 오탐 방지)",
+          pair["sl"] == "HAVE" and pair["sl_orig"] == "HAVE")
+    check("보수 머지 — 멱등(두 번 돌려도 같다)",
+          au.merge_into_records(out, new, _quiet)[0] == out
+          and au.merge_into_records(out, new, _quiet)[1:3] == (0, 0))
+
+    # (5) 검수원 입력 보호 — 실파일 정답표로 만든 records 에 손을 댄 뒤 같은 리스트를 다시 올린다
+    base = _lp_fixture_records("list_customs.xlsx")
+    worked = json.loads(json.dumps(base, ensure_ascii=False))
+    victims = sorted(worked)[:3]
+    worked[victims[0]].update({"sl": "손으로고친실", "sl_orig": base[victims[0]]["sl"],
+                               "sl_history": [{"from": base[victims[0]]["sl"],
+                                               "to": "손으로고친실", "by": "성일"}]})
+    worked[victims[1]].update({"rfSet": "-18", "rfAct": "-17.4", "rfSrc": "manual",
+                               "rfCheckedAt": 1785000000000, "rfCheckedBy": "성일"})
+    worked[victims[2]].update({"eseal": "EMPTY999", "eseal_orig": "EMPTY999",
+                               "memo": "봉인 파손 확인"})
+    before = json.loads(json.dumps(worked, ensure_ascii=False))
+    db = FakeDB({"voyages/STSE_2657E/discharge/records": worked})
+    files = [_lu_file("list_customs.xlsx",
+                      [dict(r, _source="list_customs.xlsx") for r in base.values()],
+                      mtime=1.0)]
+    added, filled, conf, ok = au.upload_lists(db, "STSE_2657E", "discharge", files, _quiet)
+    after = db.data["voyages/STSE_2657E/discharge/records"]
+    changed = []
+    for cn, rec in before.items():
+        for field, value in rec.items():
+            if after.get(cn, {}).get(field) != value:
+                changed.append("%s.%s %r→%r" % (cn, field, value, after.get(cn, {}).get(field)))
+    check("검수원 보호 — 손댄 records 위에 같은 리스트를 다시 올려도 전값 불변",
+          not changed and ok, "; ".join(changed[:3]))
+    check("검수원 보호 — 새 컨 0 · 실번호 충돌만 보고", added == 0 and conf == 1,
+          "추가 %d · 충돌 %d" % (added, conf))
+    db.calls = []
+    au.upload_lists(db, "STSE_2657E", "discharge", files, _quiet)
+    check("변경이 없으면 PUT 을 하지 않는다(멱등)", not db.writes("PUT"),
+          "쓰기 %d건" % len(db.writes("PUT")))
+
+    # (6) 기존 노드를 못 읽으면 아무것도 올리지 않는다(되덮기 금지)
+    class _BlindDB(FakeDB):
+        def get(self, path, params=None):
+            raise IOError("네트워크 끊김")
+    blind = _BlindDB({})
+    r = au.upload_lists(blind, "STSE_2657E", "discharge", files, _quiet)
+    check("GET 실패 — PUT 0 · 실패로 보고(다음 사이클 재시도)",
+          r == (0, 0, 0, False) and not blind.writes("PUT"))
+    odd = FakeDB({"voyages/STSE_2657E/discharge/records": "이상한값"})
+    r = au.upload_lists(odd, "STSE_2657E", "discharge", files, _quiet)
+    check("기존 records 모양이 사전이 아니면 손대지 않는다",
+          r[3] is False and not odd.writes("PUT"))
+
+    # (7) 판독 모듈이 없으면 리스트 단계만 건너뛴다(수집·EDI 는 계속)
+    saved = list(au._LP_MOD)
+    try:
+        au._LP_MOD[0], au._LP_MOD[1] = None, "openpyxl이 없습니다 — 시험"
+        lines = []
+        got = au.scan_lists(HERE, ["x.xlsx"], None, lines.append)
+        check("의존성 부재 — 리스트 0장 + 사유 로그",
+              got == [] and any("건너뜁니다" in m for m in lines), repr(lines[:1]))
+    finally:
+        au._LP_MOD[0], au._LP_MOD[1] = saved[0], saved[1]
+
+    # (8) 실파일 종단 — 미니 메일박스 한 판이 records 를 JS 정답표대로 채운다
+    if lp._load_openpyxl()[0] is None or lp._load_xlrd()[0] is None:
+        print("  [i] openpyxl·xlrd 가 없어 실파일 종단을 건너뛴다(격자 경로는 위에서 확인).")
+        return
+    fx = os.path.join(HERE, "fixtures")
+    plan = {"discharge": ["list_customs.xlsx", "list_crownix.xls", "list_rizhao.xlsx"],
+            "loading": ["list_std.xls", "list_synth.xlsx"]}
+    tmp = tempfile.mkdtemp(prefix="mailpilot_list_")
+    try:
+        root = os.path.join(tmp, "MB")
+        vdir = os.path.join(root, "STSE", "2657E")
+        os.makedirs(vdir, exist_ok=True)
+        for names in plan.values():
+            for name in names:
+                shutil.copyfile(os.path.join(fx, name), os.path.join(vdir, name))
+        # 방향 불명(건너뛰기) · 마감텔리(report) 는 올리면 안 된다
+        shutil.copyfile(os.path.join(fx, "list_named_xls.xls"),
+                        os.path.join(vdir, "list_named_xls.xls"))
+        shutil.copyfile(os.path.join(fx, "list_std.xls"),
+                        os.path.join(vdir, "STSE 2657E PTK TALLY REPORT.xls"))
+
+        db = FakeDB()
+        state = os.path.join(tmp, "upload_state.json")
+        res = au.run(root, {"names": {}, "codes": {}}, AU_MASTER, db, {}, _quiet, state_path=state)
+
+        diff = []
+        for mode, names in plan.items():
+            want = {}
+            for name in names:
+                for cn, rec in _lp_fixture_records(name).items():
+                    want[cn] = dict(rec, _source=name)
+            got = db.data.get("voyages/STSE_2657E/%s/records" % mode) or {}
+            if set(got) != set(want):
+                diff.append("%s 컨 %d != %d" % (mode, len(got), len(want)))
+                continue
+            for cn in want:
+                for field in sorted(set(want[cn]) | set(got[cn])):
+                    a, b = want[cn].get(field, "<없음>"), got[cn].get(field, "<없음>")
+                    if isinstance(a, (int, float)) and isinstance(b, (int, float)) \
+                            and not isinstance(a, bool) and not isinstance(b, bool):
+                        if float(a) == float(b):
+                            continue
+                    elif a == b:
+                        continue
+                    diff.append("%s %s %s: %r != %r" % (mode, cn, field, a, b))
+        check("실파일 종단 — records 가 JS 정답표와 컨·전필드 일치(양하 16 · 선적 14)",
+              not diff, "; ".join(diff[:3]))
+        check("실파일 종단 — 방향 불명 파일은 안 올린다(list_named_xls 6대 제외)",
+              len(db.data.get("voyages/STSE_2657E/discharge/records") or {}) == 16
+              and len(db.data.get("voyages/STSE_2657E/loading/records") or {}) == 14)
+        check("실파일 종단 — 마감텔리(TALLY REPORT)는 리스트가 아니다",
+              all("TALLY REPORT" not in str((r or {}).get("_source", ""))
+                  for r in (db.data.get("voyages/STSE_2657E/loading/records") or {}).values()))
+        check("실파일 종단 — 사이클 보고에 리스트 통계가 실린다",
+              res["listAdded"] == 30 and sorted(res["lists"])
+              == ["STSE_2657E/discharge", "STSE_2657E/loading"],
+              "추가 %d · %s" % (res["listAdded"], res["lists"]))
+        check("실파일 종단 — null 을 보내지 않는다",
+              not [b for c in db.writes("PUT") for b in _nulls(c[2])])
+
+        db.calls = []
+        au.run(root, {"names": {}, "codes": {}}, AU_MASTER, db, {}, _quiet, state_path=state)
+        check("두 번째 사이클 — 지문 그대로면 재업로드 0", not db.writes("PUT"),
+              "쓰기 %d건" % len(db.writes("PUT")))
+
+        # 지문이 바뀌어 다시 돌아도(리스트 파일 추가) 이미 올라간 값은 그대로다
+        shutil.copyfile(os.path.join(fx, "list_cll_lugg.xlsx"),
+                        os.path.join(vdir, "list_cll_lugg.xlsx"))
+        snap = json.loads(json.dumps(db.data.get("voyages/STSE_2657E/loading/records"),
+                                     ensure_ascii=False))
+        au.run(root, {"names": {}, "codes": {}}, AU_MASTER, db, {}, _quiet, state_path=state)
+        now = db.data.get("voyages/STSE_2657E/loading/records") or {}
+        kept = all(now.get(cn) == rec for cn, rec in snap.items())
+        check("리스트가 늘어도 이미 올라간 값은 그대로(새 컨만 는다)",
+              kept and len(now) > len(snap), "%d → %d" % (len(snap), len(now)))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -3646,6 +4159,8 @@ def main():
     test_expected_cards()
     test_reclassify_unfiled()
     test_gui_layout_and_approve()
+    test_list_parser()
+    test_list_upload()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

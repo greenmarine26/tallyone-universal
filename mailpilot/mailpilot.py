@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.8"
+VERSION = "MailPilot Uni 0.9"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -1633,6 +1633,9 @@ class Collector:
         summary["appBlocked"] = list(result.get("blocked") or [])
         summary["appExpected"] = list(result.get("expected") or [])   # 0.7 예정등록
         summary["appRetired"] = list(result.get("retired") or [])
+        summary["appLists"] = list(result.get("lists") or [])          # 0.9 리스트 업로드
+        summary["appListAdded"] = result.get("listAdded", 0)
+        summary["appListFilled"] = result.get("listFilled", 0)
         summary["errors"] += result.get("errors", 0)
         return result
 
