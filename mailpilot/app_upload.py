@@ -37,6 +37,15 @@ RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현�
 DEFAULT_HOME_PORT_ALIASES = ["PTK", "KRPTK", "KRPYT", "PYT", "KRPYOTM", "PYOTM", "KRPYO"]
 _HOME_SUFFIX = re.compile(r"(PTK|PYT|PYOTM|PYO)$")
 
+# 0.10 — 코드 말고 **실물이 쓰는 두 표기**를 더 받는다. 실측한 형태만 넣는다(일반화 금지).
+#   ㉮ 항명 표기   'PYEONGTAEK' · 'PYONGTAEK'(뒤에 ',KOREA' 가 붙어 온다)
+#      실측: TMPZ 2023E·2025E 의 중국 선사 리스트 整船清单.XLSX · 冷箱清单.xls 의 DISCHRG/PORT 열.
+#   ㉯ 선석(부두) 코드 'PTK02' · 'PTK04'
+#      실측: 선사 표준 내보내기('… (Excel).xls' · 'LIST OUT')의 LWHARF 열 — 판독기가 POL 로 잡는다.
+#      평택항 부두 번호일 뿐 다른 항이 아니다(40여 장 전수 확인 — 전부 평택 선적분).
+_HOME_NAME = re.compile(r"^(?:KR)?(?:PYEONGTAEK|PYONGTAEK)$")
+_HOME_BERTH = re.compile(r"^(?:KR)?(?:PTK|PYT)[0-9]{1,2}$")
+
 # 항차 방향 — 폴더 이름 끝 글자. E/N = 양하(들어온다) · W/S = 선적(싣는다).
 _DIS_SUFFIX = ("E", "N")
 _LOAD_SUFFIX = ("W", "S")
@@ -78,7 +87,11 @@ def _now_ms():
 # ──────────────────────────── ㉮ 홈포트 판정 ────────────────────────────
 
 def is_home_port(code, aliases=None):
-    """이 항구 코드가 우리 항(모항)인가. 앱 JS 의 isPyeongtaekPort 와 같은 기준."""
+    """이 항구 코드가 우리 항(모항)인가. 앱 JS 의 isPyeongtaekPort 와 같은 기준.
+
+    0.10 — 코드 외에 실물 표기 둘을 더 받는다: 항명('PYEONGTAEK', ',KOREA' 가 붙어 오기도 한다)과
+    선석 코드('PTK02'). 나라 이름이 쉼표로 붙는 표기는 앞 조각만 본다('KWANGYANG, KOREA' → KWANGYANG).
+    """
     if not code:
         return False
     text = str(code).upper().strip()
@@ -86,9 +99,17 @@ def is_home_port(code, aliases=None):
         return False
     table = [str(a).upper().strip() for a in (aliases or DEFAULT_HOME_PORT_ALIASES)
              if str(a).strip()]
-    if text in table:
-        return True
-    return bool(_HOME_SUFFIX.search(text))
+    head = text.split(",")[0].strip()                # 'KRPTK,PYEONGTAEK' · 'PYONGTAEK,KOREA'
+    for token in (text, head):
+        if not token:
+            continue
+        if token in table:
+            return True
+        if _HOME_SUFFIX.search(token):
+            return True
+        if _HOME_NAME.match(token) or _HOME_BERTH.match(token):
+            return True
+    return False
 
 
 def home_aliases(cfg):
@@ -704,6 +725,141 @@ RANK_FINAL, RANK_REVISED, RANK_NTH, RANK_PLAIN = 400, 300, 200, 100
 _HINT_DIS = re.compile(r"(?<![A-Z])CDL(?![A-Z])|DISCH", re.I)
 _HINT_LOAD = re.compile(r"(?<![A-Z])CLL(?![A-Z])|LOAD", re.I)
 
+# ── 0.10 「내용 판독」 — 시트 머리 블록에서 **목적항**을 읽는다 ────────────────────
+#
+# 검수사 확정 규칙: "목적항이 어디냐. **평택이면 양하, 타목적지면 선적**."
+# POL/POD 열이 컨마다 붙어 있지 않은 리스트가 많다. 그런 리스트는 머리 블록(표 위 몇 줄)에
+# 항로가 한 번만 적혀 있다. 실물에서 확인한 표기만 규칙으로 넣는다(추측 정규식 금지).
+#
+#   ㉮ 라벨 붙은 항로쌍  'LOD/DIS :  KRPTK,PYEONGTAEK/CNTAG'
+#      실측: 태영상선 'cntr_number_list(xtp 0535w)krptk.xls' 등 7장. 왼쪽=적재항, 오른쪽=목적항.
+#   ㉯ 라벨 붙은 적재항  'L/PORT: NINGBO' · 'Port of Loading: NINGBO'
+#      실측: TMPZ 整船清单.XLSX · 冷箱清单.xls. 적재항이 타항이면 우리는 목적항 → 양하.
+#   ㉰ 항로 토막       'LYG-PTK'(연운항→평택)
+#      실측: TNJP '…CNTR LIST.xlsx' 11장의 PORT 칸. 오른쪽이 목적항이다.
+#   ㉱ 제목줄 방향말   'CONTAINER DISCHARGING LIST' · 'Container Number List (OUTBOUND)'
+#      양쪽이 다 나오면(터미널 출항보고서의 DISC/LOAD 시트) **무효**로 본다 — 우리 방향이 아니다.
+#
+# 머리 블록으로 보는 범위는 시트 앞 12줄이다(실측: 위 표기는 모두 그 안에 있다).
+LIST_HEAD_ROWS = 12
+LIST_HEAD_SHEETS = 8
+
+_HEAD_LOD_DIS = re.compile(r"LOD\s*/\s*DIS\b", re.I)
+_HEAD_PORT_PAIR = re.compile(
+    r"(?<![A-Z0-9])([A-Z]{3,5}(?:\s*,\s*[A-Z]{3,12})?)\s*/\s*([A-Z]{3,5}(?:\s*,\s*[A-Z]{3,12})?)"
+    r"(?![A-Z0-9])")
+_HEAD_DIS_PORT = re.compile(
+    r"(?:D\s*/\s*PORT|PORT\s+OF\s+DISCHARGE|DISCHARGE\s+PORT)\s*[:：]\s*([A-Z][A-Z ]{2,24})", re.I)
+_HEAD_LOAD_PORT = re.compile(
+    r"(?:L\s*/\s*PORT|PORT\s+OF\s+LOADING|LOADING\s+PORT)\s*[:：]\s*([A-Z][A-Z ]{2,24})", re.I)
+# 항로 토막은 **칸 하나가 통째로** 그 모양일 때만 본다.
+#   ('XIN QUN DAO - 2630E … _PTK-TALLY_REPORT' 처럼 글 속에 박힌 '-' 를 항로로 오독하지 않기 위함)
+_HEAD_ROUTE = re.compile(r"^([A-Z]{3,5})\s*-\s*([A-Z]{3,5})$")
+_HEAD_TITLE_DIS = re.compile(r"DISCHARG\w*\s+LIST|\(\s*INBOUND\s*\)", re.I)
+_HEAD_TITLE_LOAD = re.compile(r"LOAD\w*\s+LIST|\(\s*OUTBOUND\s*\)", re.I)
+
+
+# 리스트가 아닌 서류가 파일 이름만으로는 안 걸러질 때가 있다 — 머리 블록이 스스로 밝힌다.
+#   실측: RZOR 'PLAN.xlsx' 는 이름에 아무 표시가 없지만 첫 줄이 'M/V "RIZHAO ORIENT" STOWAGE PLAN'.
+#   list_parser.detect_list_kind 는 파서 코어(JS 대조 계약)라 손대지 않고, 여기서 한 겹 더 거른다.
+#   ⚠ '터미널 출항보고서(TDR)'는 넣지 않는다 — 0.9 가 이미 그 안의 적재리스트를 양하로 올리고 있고
+#     (실측 'tdr_CCT2.xls' → NSDC 2607N 양하), 이 판에서 그 동작을 바꾸지 않는다(한 판에 하나).
+_HEAD_REPORT = re.compile(
+    r"STOWAGE\s*PLAN|BAY\s*PLAN|TALLY\s*REPORT|WORKING\s*REPORT|PERFORMANCE\s*REPORT"
+    r"|마감\s*텔리", re.I)
+
+
+def head_is_report(sheets):
+    """머리 블록이 '리스트가 아니라 보고서·플랜'이라고 밝히는가. 밝히면 그 문구."""
+    for text, _cell in _head_lines(sheets):
+        hit = _HEAD_REPORT.search(text)
+        if hit:
+            return hit.group(0)
+    return ""
+
+
+def _head_lines(sheets):
+    """시트 머리 블록을 훑을 글 목록으로 만든다 — [(글, 칸하나인가)].
+
+    칸 하나씩과 '그 행의 칸을 이은 글'을 함께 담는다. 라벨과 값이 다른 칸에 있는 파일
+    (태영상선 'LOD/DIS :' | 'KRPTK,PYEONGTAEK/CNTAG')은 이은 글에서 붙고,
+    칸 하나에 줄바꿈으로 여러 항목이 든 파일(冷箱清单)은 낱줄로 펴서 담는다.
+    """
+    lines = []
+    for _name, grid in (sheets or [])[:LIST_HEAD_SHEETS]:
+        for row in (grid or [])[:LIST_HEAD_ROWS]:
+            cells = [str(c) for c in (row or []) if str(c or "").strip()]
+            if not cells:
+                continue
+            for cell in cells:
+                for part in str(cell).splitlines():
+                    if part.strip():
+                        lines.append((part.strip(), True))
+            if len(cells) > 1:
+                lines.append((" ".join(cells), False))
+    return lines
+
+
+def _port_side_mode(load_port, dis_port, aliases):
+    """적재항·목적항 표기 한 쌍 → 방향. 목적항이 먼저다(검수사 확정 규칙).
+
+    목적항이 우리 항이면 양하, 타항이면 선적. 목적항을 모르고 적재항만 알면 뒤집어 본다.
+    둘 다 우리 항이거나 둘 다 타항이면 가릴 수 없다('' 를 돌려준다).
+    """
+    dis_home = is_home_port(dis_port, aliases) if dis_port else None
+    load_home = is_home_port(load_port, aliases) if load_port else None
+    if dis_home is not None and load_home is not None and dis_home == load_home:
+        return ""
+    if dis_home is not None:
+        return "discharge" if dis_home else "loading"
+    if load_home is not None:
+        return "loading" if load_home else "discharge"
+    return ""
+
+
+def head_dest_mode(sheets, aliases=None):
+    """머리 블록의 목적항 표기로 방향을 읽는다. ('discharge'|'loading'|'', 근거문구)."""
+    lines = _head_lines(sheets)
+    if not lines:
+        return "", ""
+    for text, _cell in lines:                         # ㉮ 라벨 붙은 항로쌍이 가장 확실하다
+        hit = _HEAD_LOD_DIS.search(text)
+        if not hit:
+            continue
+        for pair in _HEAD_PORT_PAIR.finditer(text[hit.end():].upper()):
+            # 항로가 적혀 있으면 그것으로 끝낸다 — 아래 힌트로 넘어가지 않는다.
+            #   양쪽 다 타항이면 우리 화물이 아니라는 **증거**다(실측: KAI PING 0596W 는 인천→타이창).
+            return (_port_side_mode(pair.group(1), pair.group(2), aliases),
+                    "LOD/DIS %s" % pair.group(0))
+    for text, _cell in lines:                         # ㉯ 라벨 붙은 목적항(검수사 규칙의 본문)
+        hit = _HEAD_DIS_PORT.search(text)
+        if not hit:
+            continue
+        return (_port_side_mode("", hit.group(1).strip(), aliases),
+                "목적항 %s" % hit.group(1).strip())
+    for text, _cell in lines:                         # ㉰ 라벨 붙은 적재항(목적항이 없을 때만)
+        hit = _HEAD_LOAD_PORT.search(text)
+        if not hit:
+            continue
+        return (_port_side_mode(hit.group(1).strip(), "", aliases),
+                "적재항 %s" % hit.group(1).strip())
+    for text, cell in lines:                          # ㉱ 항로 토막(칸 하나 · 한쪽만 우리 항)
+        if not cell:
+            continue
+        hit = _HEAD_ROUTE.match(text.upper())
+        if not hit:
+            continue
+        mode = _port_side_mode(hit.group(1), hit.group(2), aliases)
+        if mode:
+            return mode, "항로 %s" % hit.group(0)
+    dis_hit = [t for t, _c in lines if _HEAD_TITLE_DIS.search(t)]
+    load_hit = [t for t, _c in lines if _HEAD_TITLE_LOAD.search(t)]
+    if dis_hit and not load_hit:                      # ㉲ 제목줄 방향말 — 한쪽만 나올 때만
+        return "discharge", "제목 %s" % dis_hit[0][:40]
+    if load_hit and not dis_hit:
+        return "loading", "제목 %s" % load_hit[0][:40]
+    return "", ""
+
 # 값이 0 이면 '그 열이 없었다'는 뜻인 필드(검수앱 firebase.js _ZERO_IS_EMPTY 와 같은 정신).
 #   ⚠ 참/거짓(False)은 빈 값이 아니다 — dg/rf 의 False 는 '아니다'라는 판정값이다.
 LIST_PAIR_FIELDS = (("sl", "sl_orig"), ("eseal", "eseal_orig"))
@@ -729,13 +885,15 @@ def list_rank(name):
     return RANK_PLAIN
 
 
-def list_mode(dis_home, load_home, name):
+def list_mode(dis_home, load_home, name, head_mode=""):
     """이 리스트가 어느 방향인가. 'discharge' · 'loading' · ''(가릴 수 없음).
 
-    ① 내용이 먼저다 — 홈포트 POD 가 많으면 양하, POL 이 많으면 선적.
+    ① 컨별 내용이 먼저다 — 홈포트 POD 가 많으면 양하, POL 이 많으면 선적.
        (실증: 'XINQUNDAO 2629W DIS LIST AFTER KRPTK.XLS' 는 이름이 DIS 인데 내용은 선적분이다.)
-    ② 동수·판정 불가면 파일명 힌트(CDL/DISCH=양하 · CLL/LOAD=선적).
-    ③ 그래도 불명이면 ''를 돌려준다 — **넘겨짚지 않고 건너뛴다.**
+    ② 0.10 — 컨별 항구 칸이 없으면 **머리 블록의 목적항**(head_dest_mode)을 본다.
+       검수사 확정 규칙: 목적항이 평택이면 양하, 타목적지면 선적.
+    ③ 그래도 못 가리면 파일명 힌트(CDL/DISCH=양하 · CLL/LOAD=선적).
+    ④ 그래도 불명이면 ''를 돌려준다 — **넘겨짚지 않고 건너뛴다.**
        (실증: 'SWSP 2606N (Excel).xls' 는 폴더가 2606N(양하)인데 검수사는 선적에 올렸다.
         폴더 방향을 힌트로 쓰면 반대로 올라간다 — 그래서 폴더는 근거로 쓰지 않는다.)
     """
@@ -743,6 +901,8 @@ def list_mode(dis_home, load_home, name):
         return "discharge"
     if load_home > dis_home:
         return "loading"
+    if head_mode in ("discharge", "loading"):
+        return head_mode
     dis_hint = bool(_HINT_DIS.search(str(name or "")))
     load_hint = bool(_HINT_LOAD.search(str(name or "")))
     if dis_hint and not load_hint:
@@ -889,6 +1049,10 @@ def scan_lists(folder, names, aliases, log, folder_dir=""):
             continue
         if lp.detect_list_kind(name, sheets) != "list":
             continue                                  # 내용에 리스트 시트가 없다(요약표 등)
+        report_why = head_is_report(sheets)            # 0.10 — 내용이 스스로 '플랜·보고서'라 밝히면 뺀다
+        if report_why:
+            log("    · 리스트가 아닙니다(내용이 밝힘: %s) — 올리지 않습니다: %s" % (report_why, name))
+            continue
         try:
             parsed = lp.parse_list_sheets(sheets, source=name)
         except Exception as exc:                      # 한 파일이 깨져도 폴더 전체를 죽이지 않는다
@@ -899,11 +1063,17 @@ def scan_lists(folder, names, aliases, log, folder_dir=""):
             continue
         dis_home = sum(1 for r in recs if is_home_port(r.get("pod"), aliases))
         load_home = sum(1 for r in recs if is_home_port(r.get("pol"), aliases))
-        mode = list_mode(dis_home, load_home, name)
+        head_mode, head_why = "", ""
+        if dis_home == load_home:                     # 컨별 항구 칸으로 못 가릴 때만 머리 블록을 본다
+            head_mode, head_why = head_dest_mode(sheets, aliases)
+        mode = list_mode(dis_home, load_home, name, head_mode)
         if not mode:
             log("    ⤫ 리스트 방향을 가릴 수 없어 건너뜁니다: %s (컨 %d · 홈 POD %d · POL %d)"
                 % (name, len(recs), dis_home, load_home))
             continue
+        if head_mode and head_mode == mode:
+            log("    · 내용 판독 — %s 방향 %s (근거: %s)"
+                % (name, "양하" if mode == "discharge" else "선적", head_why))
         try:
             mtime = os.path.getmtime(path)
         except OSError:

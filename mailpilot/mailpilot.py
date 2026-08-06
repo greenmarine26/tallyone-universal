@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.9"
+VERSION = "MailPilot Uni 0.10"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -704,6 +704,155 @@ def read_mail_target(subject, filenames=None, cache=None, master=None):
             "source": "", "reason": "항차 판독 실패"}
 
 
+# ──────────────────────── 0.10 「내용 판독」 — 첨부 속에서 선박·항차 ────────────────────────
+#
+# 제목·첨부파일명으로 못 읽는 메일이 남는다. 실측한 잔류 유형 셋:
+#   · 'OCEAN BLUE WHALE 2701EBAY'   항차 뒤에 글자가 붙어(2701E+BAY) 항차 패턴이 안 걸린다
+#   · '日照东方R081E装船托盘清单'      항차가 한자에 붙어 낱말 경계(\b)가 서지 않는다
+#   · 'PCSZ 검수 자료' · 'ATPR 033'   제목에 항차가 아예 없다
+# 첨부를 **열어서** 읽으면 셋 다 안에 선박·항차가 적혀 있다.
+#
+# 지키는 선:
+#   · 제목·첨부파일명이 먼저 실패했을 때만 연다(모든 메일에 돌리지 않는다 — 성능).
+#   · 선박은 **정본표에 걸릴 때만** 인정한다(내용에서 자동 코드를 만들지 않는다).
+#   · 항차는 기존 VOYAGE_PATTERNS 로 뽑고 app_upload.voy_ident 로 한 번 더 검증한다.
+#   · 서로 다른 (선박·항차)가 둘 이상 잡히면 **포기한다** — 넘겨짚지 않는다.
+#     (실측: 'BILL LINE-2026년 7월.xlsx' 는 한 달치 전 선박 청구표, MAERSK 장기 스케줄표도 같다.)
+CONTENT_EDI_EXTS = (".edi", ".asc", ".txt")
+CONTENT_XL_EXTS = (".xls", ".xlsx", ".xlsm")
+CONTENT_MAX_BYTES = 8 * 1024 * 1024      # 이보다 큰 첨부는 열지 않는다(사이클을 붙잡지 않게)
+CONTENT_HEAD_ROWS = 15                   # 엑셀에서 훑을 머리 줄 수(실측: 선박·항차는 그 안에 있다)
+CONTENT_MAX_SHEETS = 8
+
+
+def _decode_bytes(data):
+    """첨부 바이트를 글로 바꾼다. 못 바꾸면 빈 글(조용히 죽지 않는다)."""
+    for enc in ("utf-8", "cp949", "latin-1"):
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, AttributeError):
+            continue
+    return ""
+
+
+def content_candidates(filename, data):
+    """첨부 하나에서 (선박 표기, 항차 토큰) 후보를 뽑는다. 못 읽으면 빈 목록."""
+    low = str(filename or "").lower()
+    out = []
+    if low.endswith(CONTENT_EDI_EXTS):
+        try:
+            import edi_parser
+        except Exception as exc:                       # 조용한 실패 금지 — 사유를 남긴다
+            log("내용 판독 — EDI 판독기를 부르지 못했습니다: %s: %s" % (type(exc).__name__, exc))
+            return out
+        text = _decode_bytes(data)
+        if not text:
+            return out
+        try:
+            parsed = edi_parser.parse_edi(text, filename)
+        except Exception as exc:
+            log("내용 판독 — EDI 판독 실패(%s) %s: %s" % (filename, type(exc).__name__, exc))
+            return out
+        voyage, _pos = find_voyage(str(parsed.get("voy") or ""))
+        if voyage:
+            out.append((str(parsed.get("vessel") or ""), voyage))
+        return out
+    if low.endswith(CONTENT_XL_EXTS):
+        try:
+            import list_parser
+        except Exception as exc:
+            log("내용 판독 — 엑셀 판독기를 부르지 못했습니다: %s: %s" % (type(exc).__name__, exc))
+            return out
+        sheets, why = list_parser.read_sheets(data, filename)
+        if why or not sheets:
+            return out
+        for _name, grid in sheets[:CONTENT_MAX_SHEETS]:
+            head = []
+            for row in (grid or [])[:CONTENT_HEAD_ROWS]:
+                line = " ".join(str(c or "") for c in (row or [])).strip()
+                if not line:
+                    continue
+                head.append(line)
+                voyage, _pos = find_voyage(line)
+                if voyage:
+                    out.append((line, voyage))
+            joined = " ".join(head)                    # 선박과 항차가 다른 칸·다른 줄에 있는 표
+            voyage, _pos = find_voyage(joined)
+            if voyage:
+                out.append((joined, voyage))
+        return out
+    return out
+
+
+def read_content_target(files, master, fallback_text=""):
+    """첨부 내용으로 선박·항차를 읽는다. files: [(파일명, 바이트)].
+
+    돌려주는 값은 read_mail_target 과 같은 모양이다(source 는 '내용:파일명').
+    정본 선박 + 유효 항차가 **하나로 모일 때만** ok. 갈리면 미분류를 유지한다.
+    """
+    fail = {"ok": False, "vessel": None, "voyage": None, "code": None,
+            "source": "", "reason": "내용 판독 실패"}
+    if not files or not master:
+        return fail
+    cands = []
+    for name, data in files:
+        if not data or len(data) > CONTENT_MAX_BYTES:
+            continue
+        try:
+            for vessel_text, voyage in content_candidates(name, data):
+                if app_upload.voy_ident(voyage) is None:
+                    continue                           # 방향(E/W/N/S)이 안 서는 토큰은 버린다
+                cands.append((name, vessel_text, voyage))
+        except Exception as exc:                       # 첨부 하나가 깨져도 나머지는 읽는다
+            log("내용 판독 — 첨부를 열지 못했습니다(%s): %s: %s"
+                % (name, type(exc).__name__, exc))
+    if not cands:
+        return fail
+
+    hits = []                                          # ① 선박도 내용에서 읽는다
+    for name, vessel_text, voyage in cands:
+        item = resolve_master(vessel_text, master)
+        if item and (item["code"], voyage) not in [(h[1]["code"], h[2]) for h in hits]:
+            hits.append((name, item, voyage))
+    if len(hits) == 1:
+        name, item, voyage = hits[0]
+        return {"ok": True, "vessel": item["name"], "voyage": voyage,
+                "code": item["code"], "source": "내용:%s" % name, "reason": ""}
+    if len(hits) > 1:
+        return {"ok": False, "vessel": None, "voyage": None, "code": None, "source": "",
+                "reason": "내용에 선박·항차가 여러 건(%d) — 넘겨짚지 않습니다" % len(hits)}
+
+    item = match_master(fallback_text or "", master)    # ② 선박은 제목·첨부명, 항차만 내용에서
+    if not item:
+        return fail
+    voys = []
+    for name, _vessel_text, voyage in cands:
+        if voyage not in [v[1] for v in voys]:
+            voys.append((name, voyage))
+    if len(voys) != 1:
+        return {"ok": False, "vessel": None, "voyage": None, "code": None, "source": "",
+                "reason": "내용에 항차가 여러 건(%d) — 넘겨짚지 않습니다" % len(voys)}
+    return {"ok": True, "vessel": item["name"], "voyage": voys[0][1],
+            "code": item["code"], "source": "내용:%s" % voys[0][0], "reason": ""}
+
+
+def content_files_from_dir(folder, names):
+    """폴더에서 내용 판독 대상 첨부만 읽어 [(이름, 바이트)] 로 만든다."""
+    out = []
+    for name in names:
+        if not str(name or "").lower().endswith(CONTENT_EDI_EXTS + CONTENT_XL_EXTS):
+            continue
+        path = os.path.join(folder, name)
+        try:
+            if os.path.getsize(path) > CONTENT_MAX_BYTES:
+                continue
+            with open(path, "rb") as fh:
+                out.append((name, fh.read()))
+        except OSError as exc:
+            log("내용 판독 — 파일을 읽지 못해 건너뜁니다: %s (%s)" % (path, exc))
+    return out
+
+
 # ──────────────────────────── 파일 적재 ────────────────────────────
 
 _BAD_PATH = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -1075,8 +1224,20 @@ def reclassify_unfiled(root, cache, master, log_dir=None, state_path=None):
             continue
         target = read_mail_target(unfiled_subject(name), files, cache, master)
         if not target["ok"]:
-            result["left"] += 1                       # 지금도 못 읽는다 — 추측하지 않고 그대로 둔다
-            continue
+            # 0.10 — 폴더 이름·파일 이름으로 못 읽으면 첨부를 열어 본다(3차).
+            deep = read_content_target(content_files_from_dir(folder, files), master,
+                                       " ".join([unfiled_subject(name)] + files))
+            if deep["ok"]:
+                adopt_master(cache, {"code": deep["code"], "name": deep["vessel"]})
+                log("미분류 재판독 — 내용으로 구제: %s → 선박 %s(%s) · 항차 %s [%s]"
+                    % (name, deep["vessel"], deep["code"], deep["voyage"],
+                       deep["source"]), log_dir)
+                target = deep
+            else:
+                if deep["reason"] != "내용 판독 실패":
+                    log("미분류 재판독 — 내용 판독 보류: %s (%s)" % (name, deep["reason"]), log_dir)
+                result["left"] += 1                   # 지금도 못 읽는다 — 추측하지 않고 그대로 둔다
+                continue
         code = target["code"]
         if not tally_enabled(cache, code):
             # 검수 대상 체크를 끈 선박 — _기타 는 무접촉이 원칙이다. 옮기지 않고 그대로 둔다.
@@ -1746,6 +1907,20 @@ class Collector:
             return
         names = [n for n, _ in attachments]
         target = read_mail_target(subject, names, self.cache, self.master)
+        if not target["ok"]:
+            # 0.10 — 제목·첨부파일명이 다 실패했을 때만 첨부를 열어 본다(3차).
+            deep = read_content_target(
+                [(n, d) for n, d in attachments
+                 if str(n or "").lower().endswith(CONTENT_EDI_EXTS + CONTENT_XL_EXTS)],
+                self.master, " ".join([subject or ""] + names))
+            if deep["ok"]:
+                adopt_master(self.cache, {"code": deep["code"], "name": deep["vessel"]})
+                log("내용 판독 — %s → 선박 %s(%s) · 항차 %s [%s]"
+                    % (subject, deep["vessel"], deep["code"], deep["voyage"],
+                       deep["source"]), self.log_dir)
+                target = deep
+            elif deep["reason"] != "내용 판독 실패":
+                log("내용 판독 보류 — %s: %s" % (subject, deep["reason"]), self.log_dir)
         if target["ok"]:
             # 0.5 — 짝(E/W) 증거는 제목·첨부명에 적혀 있을 때만 모은다(추론 금지).
             fresh = app_upload.collect_pairs(" ".join([subject or ""] + names),

@@ -4121,6 +4121,365 @@ def test_list_upload():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ────────────────────── 31) 0.10 내용 판독 — 목적항으로 방향, 첨부 속에서 선박·항차 ──────────────────────
+#
+# 검수사 확정 규칙(2026-08-06): "제목뿐이 아니라 **내용을 분석**해야 한다. **목적항이 어디냐**.
+#                              **평택이면 양하이고 타목적지면 선적**이다."
+#
+# 아래 머리 블록은 0.9 가 '방향 불명'으로 건너뛴 **실물 9종**을 그대로 옮긴 것이다
+# (G:/NAVERMAILBOX·MAILBOX 2026-08-06 스냅샷). 셀 배치·표기·오탈자까지 원본 그대로 둔다.
+
+# ① 선사 표준 내보내기 — 적재항 칸에 **부두 번호**(PTK02)가 오고 POD 는 목적항이다.
+#    실물: SWSP/2606N/SWSP 2606N (Excel).xls (컨 349 · 검수사가 **선적**에 손업로드) ·
+#          XTPG/535W/XTPG 535W (Excel).xls (컨 14)
+DEST_EXPORT_HDR = ["VSL", "VYG", "RCV", "LWHARF", "POL", "DISCHARGE", "DISCHARGENM",
+                   "DLV", "ETD", "BLNO", "CNTNO", "SEAL", "TYSZ", "WGT", "FE"]
+DEST_SWSP = [DEST_EXPORT_HDR,
+             ["SWSP", "2606N", "", "PTK02", "KRPTK", "KRKAN", "KWANGYANG, KOREA", "KRKAN",
+              "20260806", "HASLK01260801072", "BMOU5199828", "", "45GP", "0", "Empty"]]
+DEST_XTPG_EXCEL = [DEST_EXPORT_HDR,
+                   ["XTPG", "535W", "", "PTK02", "KRPTK", "CNTAG", "TAICANG, CHINA", "CNTAG",
+                    "20260808", "SNKO015260800010", "HALU5676513", "", "45GP", "0", "Empty"]]
+
+# ② 태영상선 컨번호 리스트 — 머리 블록에 **라벨 붙은 항로쌍**이 한 번 적힌다(컨별 항구 칸 없음).
+#    실물: XTPG/535W/cntr_number_list(xtp 0535w)krptk.xls · XTPG/0534W/…(xtp 0534w)…
+DEST_TAIYOUNG = [
+    ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+     "", "TAIYOUNG SHIPPING CO.,LTD."],
+    [""],
+    ["Container Number List  (OUTBOUND)"],
+    [""], [""],
+    ["Vessel/Voyage :   ", "", "", "", "", "", "", "XTP(XIN TAI PING)/0535W"],
+    ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "LOD/DIS :", "", "", "", "",
+     "", "", "", "KRPTK,PYEONGTAEK/CNTAG", "", "", "", "", "", "", "Pier-Berth :", "", "",
+     "", "", "#"],
+    ["Arrival Date :", "", "", "", "", "", "", "2026-08-08"],
+    ["NO", "CONTAINER NO", "SEAL NO"],
+    ["1", "TYLU9240616", "TYS706012"],
+]
+# 같은 서식인데 **양쪽이 다 타항**인 실물(인천→타이창) — 우리 자료가 아니라는 증거다.
+#   실물: KAPN/0596W/cntr_number_list(kai 0596w).xls
+DEST_TAIYOUNG_FOREIGN = [list(r) for r in DEST_TAIYOUNG]
+DEST_TAIYOUNG_FOREIGN[6] = [c.replace("KRPTK,PYEONGTAEK/CNTAG", "KRINC,INCHEON/CNTAG")
+                            for c in DEST_TAIYOUNG_FOREIGN[6]]
+
+# ③ 연운항훼리 컨리스트 — 제목줄에 방향, PORT 칸에 **항로 토막**(출발-도착)이 한 번 적힌다.
+#    실물: TNJP/26356E/26356E CNTR LIST.xlsx (컨 116) 외 10장
+DEST_TNJP = [
+    ["CONTAINER DISCHARGING LIST"],
+    ["MRN : 26LYFRA057I"],
+    ["PORT", "SZ", "CNTR NO", "CONSIGNEE", "SEAL #", "WEIGHT"],
+    ["LYG-PTK", "4J", "CKFU9191439", "에스티엠 주식회사", "LYG437334", "21,200.00"],
+    ["", "4J", "CKFU9191995", "에스티엠 주식회사", "LYG437333", "21,200.00"],
+]
+
+# ④ 중국 선사 전선 리스트 — 목적항이 **항명**(PYEONGTAEK)으로 오고, 머리줄에 적재항이 붙는다.
+#    실물: TMPZ/2025E/整船清单.XLSX (컨 104) · TMPZ/2025E/冷箱清单.xls (컨 4)
+DEST_TMPZ_ALL = [
+    ["CONTAINER LIST"],
+    ["VESSEL: TIAN HAI PING ZE V.2025E        DATE: 2026/08/05   L/PORT: NINGBO"],
+    ["SEQ", "CNTR NO", "SEAL NO", "TYPE", "E/F", "B/L NO", "OWNER", "P/C", "PKGS",
+     "GROSS WT", "CBM", "DISCHRG/PORT", "DELIVERY/PORT"],
+    ["1", "TEMU9554354", "ES02632226", "40RH", "F", "EASTZ2025NP111A", "EAS", "P", "1110",
+     "22866", "34", "PYONGTAEK", "PYONGTAEK"],
+    ["2", "CAIU3765063", "02630288", "20GP", "F", "EASTZ2025NP112", "EAS", "P", "10",
+     "5250", "6.25", "PYEONGTAEK,KOREA", "PYEONGTAEK"],
+]
+DEST_TMPZ_REEFER = [
+    ["", "", "", "", "    达通国际항운유한공사\nEAS INTERNATIONAL SHIPPING CO., LTD."],
+    [""],
+    ["", "", "", "PRE-NOTICE OF COC REEFER CARGO"],
+    [""],
+    ["Vessel: TIAN HAI PING ZE\nVoyage: 2025E\nPort of Loading: NINGBO\t\nETD NINGBO: 2026-08-01"],
+    [""],
+    ["B/L NO.", "", "", "", "", "Container No.  ", "Container Type", "", "description",
+     "Destination"],
+    ["EASTZ2025NP391", "", "", "", "", "TTNU8534850", "45R1", "", "FROZEN GREEN BEANS",
+     "PYEONGTAEK"],
+]
+
+# ⑤ 타 터미널 출항보고서(TDR) — 우리 방향이 아니다. DISC/LOAD 두 제목이 함께 나오므로 **불명 유지**.
+#    실물: NSDC/2607N/Departure Report.xls (선전 CCT) · STSE/2657E/STSE 2657E&2658W PTK TDR.xlsx
+DEST_TDR_CCT_DISC = [
+    ["", "", "DISCHARGING LIST "],
+    ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "Print Date:", "2026/8/4"],
+    ["Ship name:", "", "", "NSDC", "Sub total:", "", "20':", "85"],
+]
+DEST_TDR_CCT_LOAD = [
+    ["", "", "", "", "", "LOADING LIST  ", "", "", "", "", "", "", "", "", "", "",
+     "Print Date:", "2026/8/4"],
+    ["Ship name:", "", "NSDC", "Voy_no:", "", "2607N"],
+]
+DEST_TDR_SITC = [
+    ["SITC TERMINAL DEPARTURE REPORT"],
+    ["VESSEL", "", "", "", "", "", "M/V  SITC SENDAI"],
+    ["VOYAGE(IN/OUT)", "", "", "", "", "", "2657E / 2658W "],
+    ["PORT", "", "", "", "", "", "PYONGTAEK, KOREA"],
+    ["TERMINAL", "", "", "", "", "", "MBM 07"],
+]
+
+# ⑥ 이름만으로는 안 걸리는 적부도 — 첫 줄이 스스로 'STOWAGE PLAN' 이라 밝힌다.
+#    실물: RZOR/R081E/PLAN.xlsx (L/Port : PYEONGTAEK · D/Port : RIZHAO)
+DEST_STOWAGE_PLAN = [
+    ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+     "", "", 'M/V "RIZHAO ORIENT" STOWAGE PLAN'],
+    ["", "Voy. No.: R081W"],
+    ["", "Date    : 2026-08-01"],
+    ["", "L/Port  : PYEONGTAEK"],
+    ["", "D/Port  : RIZHAO"],
+]
+
+
+def _dest_sheets(*grids):
+    """머리 블록 판독기가 받는 모양([(시트명, 격자)]) 으로 감싼다."""
+    return [("Sheet%d" % (i + 1), [list(r) for r in g]) for i, g in enumerate(grids)]
+
+
+def _edi_tdt(voy, vessel):
+    """TDT 한 줄이 든 최소 EDIFACT — 내용 판독이 읽는 것은 선박·항차 헤더뿐이다."""
+    return ("UNB+UNOA:2+SENDER+RECV+260730:1200+1'UNH+1+BAPLIE:D:95B:UN:SMDG20'"
+            "BGM+45'DTM+137:202607301200:203'"
+            "TDT+20+%s+++YTF:172:20+++9123456:103::%s'"
+            "LOC+5+CNYNT:139:6'UNT+8+1'UNZ+1+1'" % (voy, vessel))
+
+
+def _mail_with_bodies(subject, pairs):
+    """첨부마다 내용이 다른 .eml 원문 — 내용 판독 경로를 실제 메일로 태우기 위함."""
+    msg = email.message.EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = "ops@example.com"
+    msg["To"] = "tally@example.com"
+    msg["Date"] = "Tue, 04 Aug 2026 09:12:00 +0900"
+    msg.set_content("자료 송부합니다.")
+    for name, data in pairs:
+        msg.add_attachment(data, maintype="application", subtype="octet-stream", filename=name)
+    return msg.as_bytes()
+
+
+def _xlsx_bytes(grid):
+    """격자 하나를 xlsx 바이트로 만든다(내용 판독의 엑셀 경로 시험용). 없으면 None."""
+    try:
+        import openpyxl
+    except Exception:
+        return None
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in grid:
+        ws.append(list(row))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_content_read():
+    print("\n[31] 0.10 내용 판독 — 목적항이 방향을 정하고, 첨부 속이 선박·항차를 말한다")
+    import app_upload as au
+    al = au.DEFAULT_HOME_PORT_ALIASES
+
+    # (1) 홈포트 표기 확장 — 실물이 쓰는 항명·선석 코드. 0.5 기준(코드)은 그대로여야 한다.
+    home_yes = ["PTK", "KRPTK", "KRPYT", "KRPYOTM", "KRPYO", "XXPYT",
+                "PTK02", "PTK04", "PYEONGTAEK", "PYONGTAEK",
+                "PYEONGTAEK,KOREA", "PYONGTAEK, KOREA", "KRPTK,PYEONGTAEK"]
+    home_no = ["", None, "CNSHA", "KRPUS", "PYOT", "CNTAG", "KRINC", "KRKAN",
+               "KWANGYANG, KOREA", "TAICANG, CHINA", "NINGBO", "RIZHAO", "INCHEON"]
+    bad = [x for x in home_yes if not au.is_home_port(x)]
+    check("홈포트 표기 13종(코드·항명·선석) 을 우리 항으로 본다", not bad, repr(bad))
+    bad = [x for x in home_no if au.is_home_port(x)]
+    check("타항 13종은 우리 항이 아니다(KWANGYANG, KOREA 포함)", not bad, repr(bad))
+    check("모항 별칭을 갈아끼우면 그대로 따른다(테넌트 설정 우선)",
+          au.is_home_port("KRINC", ["KRINC"]) and not au.is_home_port("KRPUS", ["KRINC"]))
+
+    # (2) 실물 9종 — 머리 블록 판독 결과
+    cases = [
+        ("cntr_number_list(xtp 0535w)krptk.xls", _dest_sheets(DEST_TAIYOUNG), "loading",
+         "LOD/DIS"),
+        ("cntr_number_list(xtp 0534w)krptk.xls", _dest_sheets(DEST_TAIYOUNG), "loading",
+         "LOD/DIS"),
+        ("26356E CNTR LIST.xlsx", _dest_sheets(DEST_TNJP), "discharge", "항로"),
+        ("整船清单.XLSX", _dest_sheets(DEST_TMPZ_ALL), "discharge", "적재항"),
+        ("冷箱清单.xls", _dest_sheets(DEST_TMPZ_REEFER), "discharge", "적재항"),
+        ("Departure Report.xls", _dest_sheets(DEST_TDR_CCT_DISC, DEST_TDR_CCT_LOAD), "", ""),
+        ("STSE 2657E&2658W PTK TDR.xlsx", _dest_sheets(DEST_TDR_SITC), "", ""),
+        ("cntr_number_list(kai 0596w).xls", _dest_sheets(DEST_TAIYOUNG_FOREIGN), "", "LOD/DIS"),
+    ]
+    bad = []
+    for name, sheets, want, why_head in cases:
+        got, why = au.head_dest_mode(sheets, al)
+        if got != want or (why_head and not why.startswith(why_head)):
+            bad.append((name, want, got, why))
+    check("실물 머리 블록 8종 — 목적항으로 방향 판정(TDR 둘은 불명 유지)", not bad, repr(bad[:2]))
+    check("양쪽이 다 타항이면 제목말(OUTBOUND)로 넘어가지 않는다(인천→타이창 실물)",
+          au.head_dest_mode(_dest_sheets(DEST_TAIYOUNG_FOREIGN), al)[0] == "")
+    check("우리 항이 든 항로쌍은 선적으로 읽는다(태영상선 실물)",
+          au.head_dest_mode(_dest_sheets(DEST_TAIYOUNG), al) [0] == "loading")
+
+    # (3) 컨별 항구 칸이 있는 실물 둘 — 선석 코드(PTK02)가 적재항이면 선적이다
+    import list_parser as lp
+    for name, grid, want_mode in (("SWSP 2606N (Excel).xls", DEST_SWSP, "loading"),
+                                  ("XTPG 535W (Excel).xls", DEST_XTPG_EXCEL, "loading")):
+        recs = (lp.parse_list_sheets(_dest_sheets(grid), source=name) or {}).get("records") or []
+        dh = sum(1 for r in recs if au.is_home_port(r.get("pod"), al))
+        lh = sum(1 for r in recs if au.is_home_port(r.get("pol"), al))
+        check("%s — 컨 %d · 홈 POD %d · POL %d → %s"
+              % (name, len(recs), dh, lh, "선적" if want_mode == "loading" else "양하"),
+              recs and au.list_mode(dh, lh, name) == want_mode,
+              "dh=%d lh=%d mode=%r" % (dh, lh, au.list_mode(dh, lh, name)))
+    check("SWSP 2606N — 폴더는 N(양하)인데 내용은 선적이다(검수사 대조 오라클)",
+          au.list_mode(0, 349, "SWSP 2606N (Excel).xls") == "loading")
+
+    # (4) 이름만으로는 안 걸리는 적부도 — 내용이 스스로 밝히면 리스트가 아니다
+    check("PLAN.xlsx 는 첫 줄이 STOWAGE PLAN 이라 리스트가 아니다",
+          au.head_is_report(_dest_sheets(DEST_STOWAGE_PLAN)).upper() == "STOWAGE PLAN")
+    check("진짜 리스트는 보고서로 걸리지 않는다",
+          not au.head_is_report(_dest_sheets(DEST_TNJP))
+          and not au.head_is_report(_dest_sheets(DEST_TAIYOUNG)))
+
+    # (5) list_mode 순서 — 컨별 내용 > 머리 블록 > 파일명 > 건너뜀
+    check("머리 블록은 파일명 힌트보다 앞선다",
+          au.list_mode(0, 0, "XINQUNDAO 2629W DIS LIST.XLS", "loading") == "loading")
+    check("컨별 내용은 머리 블록보다 앞선다",
+          au.list_mode(0, 345, "무엇.xls", "discharge") == "loading")
+    check("머리 블록이 불명이면 0.9 그대로 파일명 힌트로 간다",
+          au.list_mode(0, 0, "CDL PCSG 2639E.xlsx", "") == "discharge"
+          and au.list_mode(0, 0, "SWSP 2606N (Excel).xls", "") == "")
+
+    # (6) 첨부 내용에서 선박·항차 — 실물 잔류 유형
+    master = core.load_master(os.path.join(PKG, "vessels_master.json"))
+    if not master:
+        master = [{"code": "OBWH", "name": "OCEAN BLUE WHALE", "aliases": [], "ko": ["연태훼리"]},
+                  {"code": "RZOR", "name": "RIZHAO ORIENT", "aliases": [],
+                   "ko": ["日照东方", "일조국제물류"]},
+                  {"code": "ATPR", "name": "ATLANTIC PIONEER", "aliases": ["ATRP"], "ko": []},
+                  {"code": "MCAP", "name": "AS PIA", "aliases": ["ASPIA"], "ko": []},
+                  {"code": "PCSZ", "name": "PACIFIC SHENZHEN", "aliases": [], "ko": []}]
+
+    # ㉮ 'OCEAN BLUE WHALE 2701EBAY' — 항차 뒤에 글자가 붙어 제목·첨부명이 다 실패한다
+    subject = "OCEAN BLUE WHALE 2701EBAY"
+    names = ["OCEAN BLUE WHALE 2701EBAY(UN15).edi", "OCEAN BLUE WHALE 2701EBAY.txt"]
+    check("제목·첨부명으로는 못 읽는다(0.9 와 같은 판정)",
+          not core.read_mail_target(subject, names, {"names": {}, "codes": {}}, master)["ok"])
+    got = core.read_content_target(
+        [(names[0], _edi_tdt("2701E", "CNYNT").encode("utf-8")),
+         (names[1], _edi_tdt("2701E", "OCEAN BLUE WHALE").encode("utf-8"))],
+        master, " ".join([subject] + names))
+    check("내용 판독 — 첫 EDI 의 선박이 정본에 없으면 다음 첨부를 본다",
+          got["ok"] and got["code"] == "OBWH" and got["voyage"] == "2701E",
+          repr(got))
+    # ㉯ 선박은 제목이 주고 항차만 내용이 주는 경우(2705E 폴더에는 EDI 한 장뿐이었다)
+    got = core.read_content_target(
+        [("OCEAN BLUE WHALE 2705EBAY(UN15).edi",
+          _edi_tdt("2705E", "CNYNT").encode("utf-8"))],
+        master, "OCEAN BLUE WHALE 2705EBAY OCEAN BLUE WHALE 2705EBAY(UN15).edi")
+    check("내용 판독 — 항차는 내용, 선박은 제목의 정본명으로 붙인다",
+          got["ok"] and got["code"] == "OBWH" and got["voyage"] == "2705E", repr(got))
+    # ㉰ 제목에 항차가 아예 없는 메일 — EDI 헤더가 둘 다 준다
+    got = core.read_content_target([("ATPR 033.edi",
+                                     _edi_tdt("2636W", "ATLANTIC PIONEER").encode("utf-8"))],
+                                   master, "ATPR 033 선적 EDI ATPR 033.edi")
+    check("내용 판독 — 제목에 항차가 없어도 EDI 헤더가 준다(ATPR 033 실물)",
+          got["ok"] and got["code"] == "ATPR" and got["voyage"] == "2636W", repr(got))
+    # ㉱ 선박·항차가 여러 건 — 넘겨짚지 않는다(월별 청구표·장기 스케줄표 실물)
+    got = core.read_content_target(
+        [("a.edi", _edi_tdt("2701E", "OCEAN BLUE WHALE").encode("utf-8")),
+         ("b.edi", _edi_tdt("R081E", "RIZHAO ORIENT").encode("utf-8"))],
+        master, "여러 배가 든 표")
+    check("내용 판독 — 선박·항차가 갈리면 포기한다(미분류 유지)",
+          not got["ok"] and "여러 건" in got["reason"], repr(got))
+    # ㉲ 정본에 없는 선박 · 방향 없는 항차는 버린다
+    got = core.read_content_target([("x.edi", _edi_tdt("2701E", "CNYNT").encode("utf-8"))],
+                                   master, "제목에 정본 선박이 없다")
+    check("내용 판독 — 정본에 없는 선박은 인정하지 않는다", not got["ok"], repr(got))
+    got = core.read_content_target([("x.edi", _edi_tdt("2701", "ATLANTIC PIONEER").encode("utf-8"))],
+                                   master, "ATPR")
+    check("내용 판독 — 방향(E/W/N/S)이 없는 항차 토큰은 버린다", not got["ok"], repr(got))
+    # ㉳ 엑셀 첨부 — 한자에 붙어 제목·첨부명이 실패하는 실물
+    data = _xlsx_bytes([["“日照东方”装船托盘清单"], ["船名:日照东方", "", "", "", "", "航次：R081E"],
+                        ["序号", "托盘号"], ["1", "A72"]])
+    if data is None:
+        check("내용 판독 — 엑셀 경로(openpyxl 없음)", True, "openpyxl 없음 — 건너뜀")
+    else:
+        got = core.read_content_target([("日照东方R081E装船托盘清单.xlsx", data)], master,
+                                       "日照东方R081E装船托盘清单")
+        check("내용 판독 — 엑셀 머리 블록의 선박·항차(日照东方 R081E 실물)",
+              got["ok"] and got["code"] == "RZOR" and got["voyage"] == "R081E", repr(got))
+
+    # (7) 미분류 재판독이 같은 길을 쓴다 + 성능(제목으로 읽히면 첨부를 열지 않는다)
+    tmp = tempfile.mkdtemp(prefix="mailpilot_content_")
+    log_dir = tempfile.mkdtemp(prefix="mailpilot_content_log_")
+    try:
+        root = os.path.join(tmp, "MAILBOX")
+        unfiled = os.path.join(root, core.UNCLASSIFIED_DIR)
+        _write(os.path.join(unfiled, "20260805_ATPR 033 선적 EDI", "ATPR 033.edi"),
+               _edi_tdt("2636W", "ATLANTIC PIONEER"))
+        _write(os.path.join(unfiled, "20260731_Revised - L77-629N-KRPYOTM-Final dischar",
+                            "FinalDischargeDeadline_L77629N631SKRPYOTM_2_Baplie.edi"),
+               _edi_tdt("629N", "AS PIA"))
+        _write(os.path.join(unfiled, "20260805_6일 선석운영계획표 송부",
+                            "8월6일 선석운영계획표.xlsx"), "NOT-AN-EXCEL")
+        _write(os.path.join(unfiled, "20260803_FW_ 선박 계선계 양식",
+                            "계선사유서 양식.pdf"), "PDF")
+        cache = {"names": {}, "codes": {}}
+        t0 = time.time()
+        res = core.reclassify_unfiled(root, cache, master, log_dir)
+        spent = time.time() - t0
+        moved = dict((r["folder"], (r["code"], r["voyage"])) for r in res["reclassified"])
+        check("미분류 재판독 — 내용으로 ATPR 033 구제",
+              moved.get("20260805_ATPR 033 선적 EDI") == ("ATPR", "2636W"), repr(moved))
+        check("미분류 재판독 — 내용으로 L77-629N(AS PIA) 구제",
+              moved.get("20260731_Revised - L77-629N-KRPYOTM-Final dischar") == ("MCAP", "629N"),
+              repr(moved))
+        check("미분류 재판독 — 못 읽는 둘은 그대로 남는다(추측 금지)", res["left"] == 2,
+              "잔류 %d" % res["left"])
+        check("미분류 재판독 — 옮긴 파일이 제 폴더에 있다",
+              os.path.isfile(os.path.join(root, "ATPR", "2636W", "ATPR 033.edi"))
+              and os.path.isfile(os.path.join(root, "MCAP", "629N",
+                                              "FinalDischargeDeadline_L77629N631SKRPYOTM_2_Baplie.edi")))
+        again = core.reclassify_unfiled(root, cache, master, log_dir)
+        check("미분류 재판독 — 두 번 돌려도 안전(멱등)", not again["reclassified"], repr(again))
+        check("성능 게이트 — 폴더 4개 내용 판독이 5초 안(실측 35폴더 3.8초)", spent < 5.0,
+              "%.2fs" % spent)
+
+        # 성능 — 제목으로 읽히는 메일은 첨부를 아예 열지 않는다
+        opened = []
+        real = core.content_candidates
+
+        def spy(name, data):
+            opened.append(name)
+            return real(name, data)
+
+        core.content_candidates = spy
+        try:
+            collector = core.Collector(
+                {"mailbox_root": root}, firebase=core.FirebaseREST(None),
+                cache_path=os.path.join(tmp, "cache.json"), log_dir=log_dir,
+                uidl_cache_path=os.path.join(tmp, "uidl.json"),
+                master_path=os.path.join(tmp, "master.json"),
+                upload_state_path=os.path.join(tmp, "state.json"))
+            collector.master = master
+            collector.cache = cache
+            summary = {"unclassified": 0, "files": 0, "skipped": 0, "errors": 0, "vessels": []}
+            good = _mail_with_bodies("연태훼리 2706W CLL 2차",
+                                     [("2706W CLL Data.xls", b"DATA")])
+            collector._handle_message(good, root, summary)
+            check("성능 게이트 — 제목으로 읽히면 첨부를 열지 않는다", not opened, repr(opened))
+            bad_mail = _mail_with_bodies(
+                "OCEAN BLUE WHALE 2701EBAY",
+                [("OCEAN BLUE WHALE 2701EBAY.txt",
+                  _edi_tdt("2701E", "OCEAN BLUE WHALE").encode("utf-8"))])
+            collector._handle_message(bad_mail, root, summary)
+            check("신규 메일도 내용으로 구제된다(제목·첨부명 실패 뒤에만)",
+                  opened == ["OCEAN BLUE WHALE 2701EBAY.txt"]
+                  and os.path.isfile(os.path.join(root, "OBWH", "2701E",
+                                                  "OCEAN BLUE WHALE 2701EBAY.txt")),
+                  repr(opened))
+        finally:
+            core.content_candidates = real
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
+
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -4161,6 +4520,7 @@ def main():
     test_gui_layout_and_approve()
     test_list_parser()
     test_list_upload()
+    test_content_read()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)
