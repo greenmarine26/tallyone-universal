@@ -35,6 +35,9 @@
  26) 0.7 예정등록 — 배정표 줄로 카드를 미리 세운다: 세울 25장 정본 대조 · info PUT 계약 ·
      기존 키 재사용(표기 흔들림) · 제외(비관할·마감·출항·정본표 없음·체크 끔·설정 끔) ·
      expected→collecting 전이 · 출항 예정 카드 철수 · 창 밖 빈 예정 카드 제거 · 멱등(쓰기 0)
+ 27) 0.7-01 미분류 재판독 — 실제 _미분류 폴더 이름 픽스처로 제자리 이동 · 판독 실패 잔류 ·
+     _기타(체크 끔) 무접촉 · 같은 크기 스킵 · 다른 크기 '(2)' · 항차 표기 승계 · 빈 폴더만 rmdir ·
+     업로드 지문 무효화 범위 · 멱등
 """
 
 import datetime
@@ -3289,6 +3292,159 @@ def test_expected_cards():
           str(out9["deleted"]))
 
 
+# ────────────────────── 27) 0.7-01 미분류 재판독 ──────────────────────
+#
+# 실제로 NAVERMAILBOX/_미분류 에 남아 있던 폴더 이름을 그대로 쓴다(정본표 0.4 이전에 떨어진 것들).
+# 지키는 선: 못 읽으면 그대로 · 파일은 옮기기만(같은 크기 스킵 · 다르면 '(2)') · 빈 폴더만 rmdir ·
+#            _기타(체크 끔)는 무접촉 · 두 번 돌려도 안전(멱등).
+
+# (폴더이름, 안에 든 파일들, 기대 코드, 기대 항차) — None 이면 잔류(판독 실패)
+UNFILED_CASES = [
+    ("20260805_일조국제물류) R083W CLL 송부 드립니다._최종",
+     ["R083W_CLL Data 최종.xls"], "RZOR", "R083W"),
+    ("20260805_연태훼리 2706W CLL 2차 (컨씰넘버최종본_231VAN)",
+     ["2706W CLL Data_vgm 2차.xls"], "OBWH", "2706W"),
+    ("20260803_[연운항훼리] 26355W LOADING LIST - 최종",
+     ["26355W 최종.xlsx"], "TNJP", "26355W"),
+    ("20260802_日照东方船图 R082E", ["2甲.PDF", "3甲.PDF"], "RZOR", "R082E"),
+    ("20260805_6일 선석운영계획표 송부", ["8월6일 선석운영계획표.xlsx"], None, None),
+    ("20260805_PCSZ 검수 자료", ["BAY PLAN.pdf"], None, None),
+    ("20260803_2026년 7월 두우해운 빌 항차", ["BILL LINE-2026년 7월.xlsx"], None, None),
+]
+
+
+def _write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def test_reclassify_unfiled():
+    print("\n[27] 0.7-01 미분류 재판독 — 정본표 이전에 _미분류 로 떨어진 메일을 제자리로")
+    import app_upload as au
+    tmp = tempfile.mkdtemp(prefix="mailpilot_unfiled_")
+    root = os.path.join(tmp, "MAILBOX")
+    log_dir = tempfile.mkdtemp(prefix="mailpilot_unfiled_log_")   # 실 로그 폴더 격리
+    state_path = os.path.join(tmp, "upload_state.json")
+    try:
+        unfiled = os.path.join(root, core.UNCLASSIFIED_DIR)
+        for name, files, _code, _voy in UNFILED_CASES:
+            for fname in files:
+                _write(os.path.join(unfiled, name, fname), "DATA-" + fname)
+        # 같은 배의 다른 항차도 각자 제 폴더로 간다
+        _write(os.path.join(unfiled, "20260731_연태훼리 2702W CLL 1차",
+                            "2702W CLL Data_vgm 1차.xls"), "DATA-2702")
+        # 이미 제자리에 같은 파일이 있는 경우(같은 크기 → 스킵, 원본 보존)
+        _write(os.path.join(unfiled, "20260804_연태훼리 2705E 입항관련서류 송부의 건",
+                            "2705E 입항보고서.pdf"), "SAME")
+        _write(os.path.join(root, "OBWH", "2705E", "2705E 입항보고서.pdf"), "SAME")
+        # 같은 이름·다른 크기 → '(2)' 부가
+        _write(os.path.join(unfiled, "20260802_연태훼리 2703E 입항관련서류 송부의 건",
+                            "2703E RF CONTAINER LIST.xlsx"), "NEW-CONTENT-LONGER")
+        _write(os.path.join(root, "OBWH", "2703E", "2703E RF CONTAINER LIST.xlsx"), "OLD")
+        # 기존 항차 표기(0패딩 흔들림) — R083W 는 접두 보호 대상이라 별도로 XTPG 로 확인
+        _write(os.path.join(unfiled, "20260730_XIN TAI PING V-535E BAY PLAN",
+                            "XTP_535E.edi"), "EDI")
+        _write(os.path.join(root, "XTPG", "0535E", "old.edi"), "OLD-EDI")
+        # 체크 끈 선박(KSKM) — 판독은 되지만 _기타 는 무접촉이라 옮기지 않는다
+        _write(os.path.join(unfiled, "20260806_SUNNY KALMIA 2609N BAY PLAN",
+                            "KSKM_2609N.edi"), "EDI-KSKM")
+        before = _all_files(root)
+
+        cache = {"names": {}, "codes": {}, "tally": {"KSKM": False}}
+
+        state = {"_v": au.STATE_V, "folders": {
+            "RZOR/R083W": {"fp": "old", "key": "RZOR_R083W"},
+            "OBWH/2706W": {"fp": "old", "key": "OBWH_2706W"},
+            "SWSP/2606N": {"fp": "keep", "key": "SWSP_2606N"}}}
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False)
+
+        out = core.reclassify_unfiled(root, cache, MASTER_FIXTURE,
+                                      log_dir=log_dir, state_path=state_path)
+        after = _all_files(root)
+        print("    재분류: %s" % [(r["folder"][:28], "%s/%s" % (r["code"], r["voyage"]))
+                                  for r in out["reclassified"]])
+        print("    이동 %d · 이미있음 %d · 잔류 %d · 실패 %d"
+              % (out["moved"], out["skipped"], out["left"], out["errors"]))
+
+        for name, files, code, voy in UNFILED_CASES:
+            if code:
+                check("재판독 — %s → %s/%s" % (name[9:29], code, voy),
+                      all(os.path.exists(os.path.join(root, code, voy, f)) for f in files)
+                      and not os.path.isdir(os.path.join(unfiled, name)))
+            else:
+                check("판독 실패는 그대로 둔다 — %s" % name[9:29],
+                      all(os.path.exists(os.path.join(unfiled, name, f)) for f in files))
+
+        check("체크 끈 선박(KSKM)은 무접촉 — _미분류 에 그대로 · _기타 도 안 만든다",
+              os.path.exists(os.path.join(unfiled, "20260806_SUNNY KALMIA 2609N BAY PLAN",
+                                          "KSKM_2609N.edi"))
+              and not os.path.isdir(os.path.join(root, core.OTHER_DIR)))
+        check("같은 이름·같은 크기는 스킵 — 원본을 지우지 않는다",
+              os.path.exists(os.path.join(unfiled, "20260804_연태훼리 2705E 입항관련서류 송부의 건",
+                                          "2705E 입항보고서.pdf"))
+              and _read(os.path.join(root, "OBWH", "2705E", "2705E 입항보고서.pdf")) == "SAME",
+              "이미있음 %d파일" % out["skipped"])
+        check("같은 이름·다른 크기는 '(2)' 로 옮긴다(덮어쓰기 없음)",
+              _read(os.path.join(root, "OBWH", "2703E",
+                                 "2703E RF CONTAINER LIST.xlsx")) == "OLD"
+              and _read(os.path.join(root, "OBWH", "2703E",
+                                     "2703E RF CONTAINER LIST (2).xlsx")) == "NEW-CONTENT-LONGER")
+        check("항차 표기는 기존 폴더를 따른다(535E → 0535E)",
+              os.path.exists(os.path.join(root, "XTPG", "0535E", "XTP_535E.edi"))
+              and not os.path.isdir(os.path.join(root, "XTPG", "535E")))
+        check("옮긴 폴더는 빈 폴더만 rmdir — 파일이 남으면 그대로",
+              not os.path.isdir(os.path.join(unfiled,
+                                             "20260805_일조국제물류) R083W CLL 송부 드립니다._최종"))
+              and os.path.isdir(os.path.join(unfiled,
+                                             "20260804_연태훼리 2705E 입항관련서류 송부의 건")))
+        check("파일은 하나도 사라지지 않는다(_미분류 포함 총계 동일)",
+              len(_all_files(root)) == len(before), "전 %d · 후 %d" % (len(before), len(after)))
+        check("옮긴 선박의 업로드 지문만 무효화(다른 선박은 보존)",
+              _state(state_path) == {"SWSP/2606N"}, str(sorted(_state(state_path))))
+        check("재분류 7폴더 · 이동 8파일 · 잔류 5폴더(실패 3 + 중복 1 + 체크끔 1)",
+              len(out["reclassified"]) == 7 and out["moved"] == 8
+              and out["skipped"] == 1 and out["left"] == 5 and out["errors"] == 0,
+              "%d폴더 · %d파일 · 잔류 %d" % (len(out["reclassified"]), out["moved"], out["left"]))
+
+        # 멱등 — 두 번째 판은 옮길 것이 없다
+        snapshot = _all_files(root)
+        out2 = core.reclassify_unfiled(root, cache, MASTER_FIXTURE,
+                                       log_dir=log_dir, state_path=state_path)
+        check("두 번 돌려도 안전(멱등) — 이동 0 · 파일 그대로",
+              out2["moved"] == 0 and not out2["reclassified"] and _all_files(root) == snapshot,
+              "이동 %d파일 · 재분류 %d폴더" % (out2["moved"], len(out2["reclassified"])))
+        check("두 번째 판은 업로드 지문을 다시 건드리지 않는다",
+              _state(state_path) == {"SWSP/2606N"}, str(sorted(_state(state_path))))
+
+        check("_미분류 폴더가 없으면 조용히 죽지 않고 빈 결과",
+              core.reclassify_unfiled(os.path.join(tmp, "빈메일박스"), cache, MASTER_FIXTURE,
+                                      log_dir=log_dir)["moved"] == 0)
+        check("폴더 이름에서 제목을 되살린다(safe_name 절단 · 날짜 없는 이름)",
+              core.unfiled_subject("20260805_Re_ 연태훼리 2706W CLL 1차") == "Re_ 연태훼리 2706W CLL 1차"
+              and core.unfiled_subject("날짜없는폴더") == "날짜없는폴더")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
+
+
+def _read(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return set((json.load(fh).get("folders") or {}).keys())
+    except (OSError, ValueError):
+        return set()
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -3325,6 +3481,7 @@ def main():
     test_voyage_spelling()
     test_berth_schedule()
     test_expected_cards()
+    test_reclassify_unfiled()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

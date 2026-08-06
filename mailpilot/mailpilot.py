@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.7"
+VERSION = "MailPilot Uni 0.7-01"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -965,6 +965,187 @@ def migrate_to_master(root, cache, master, log_dir=None, firebase=None):
     return result
 
 
+# ──────────────────────────── 미분류 재판독(0.7-01) ────────────────────────────
+#
+# 정본표(0.4)가 들어오기 전에 _미분류 로 떨어진 메일은, 이제 읽을 수 있는데도 그 자리에 남아 있다.
+# (일조·연태훼리·연운항훼리 초기분 · DXQD EAS 자료 — 앱 기준으로는 '없는 자료'였다.)
+# 기동 시 한 번, 폴더 이름의 제목 부분과 그 안의 파일 이름으로 판독을 다시 돌려 제 폴더로 옮긴다.
+#
+# 지키는 선 — 원칙은 폴더 정리·정본 이관과 같다. **옮기기만** 한다.
+#   · 판독에 실패하면 그대로 둔다(추측 금지 — 지금 못 읽는 것은 다음 판의 일이다)
+#   · 파일은 지우지도 덮어쓰지도 않는다(같은 이름·같은 크기는 스킵, 다르면 '(2)' — save_attachment 규칙 그대로)
+#   · 빈 폴더만 rmdir 한다(파일이 하나라도 남으면 OSError 로 실패하고 그대로 남는다)
+#   · _기타(검수 대상 체크를 끈 선박)는 무접촉 — 대상 선박의 체크가 꺼져 있으면 옮기지 않고 그대로 둔다
+#   · 항차 표기(0패딩)는 기존 규칙 그대로 — voyage_dirname 이 같은 항차 폴더가 있으면 그 표기를 쓴다
+# 여러 번 돌려도 안전하다(멱등) — 옮길 것이 없으면 아무것도 쓰지 않는다.
+
+# '{YYYYMMDD}_{제목요약}' 에서 제목 부분을 되살린다(제목 안의 '_' 는 그대로 남긴다).
+_UNFILED_STAMP = re.compile(r"^\d{8}_(.*)$", re.S)
+
+
+def unfiled_subject(dirname):
+    """_미분류 폴더 이름 → 제목 부분('20260805_연태훼리 2706W CLL 1차' → '연태훼리 2706W CLL 1차').
+
+    safe_name 이 40자에서 잘랐을 수 있다 — 잘려 나간 만큼은 폴더 안의 파일 이름이 메운다.
+    날짜 머리글이 없는 폴더는 이름을 통째로 제목으로 본다.
+    """
+    text = str(dirname or "").strip()
+    match = _UNFILED_STAMP.match(text)
+    return (match.group(1) if match else text).strip()
+
+
+def move_file_into(src, dst_dir, log_dir=None):
+    """파일 하나를 dst_dir 로 옮긴다 — save_attachment 와 같은 규칙.
+
+    같은 이름·같은 크기면 스킵(원본은 그대로 둔다 — 지우지 않는다),
+    이름은 같은데 크기가 다르면 '(2)' 를 붙여 옮긴다. 덮어쓰지 않는다.
+    돌려주는 값: ("moved"|"skipped"|"error", 최종경로 또는 "")
+    """
+    try:
+        size = os.path.getsize(src)
+    except OSError as exc:
+        log("미분류 재판독 — 파일을 읽지 못해 그대로 둡니다: %s (%s)" % (src, exc), log_dir)
+        return "error", ""
+    fname = safe_name(os.path.basename(src), fallback="attachment.bin", limit=120)
+    path = os.path.join(dst_dir, fname)
+    if os.path.exists(path):
+        try:
+            if os.path.getsize(path) == size:
+                return "skipped", path
+        except OSError as exc:
+            log("미분류 재판독 — 대상 파일을 확인하지 못해 그대로 둡니다: %s (%s)" % (path, exc), log_dir)
+            return "error", ""
+        stem, ext = os.path.splitext(fname)
+        n, path = 2, ""
+        while n <= 99:
+            alt = os.path.join(dst_dir, "%s (%d)%s" % (stem, n, ext))
+            if not os.path.exists(alt):
+                path = alt
+                break
+            try:
+                if os.path.getsize(alt) == size:
+                    return "skipped", alt
+            except OSError:
+                pass
+            n += 1
+        if not path:
+            log("미분류 재판독 — 같은 이름이 너무 많아 그대로 둡니다: %s" % src, log_dir)
+            return "error", ""
+    try:
+        os.rename(src, path)
+    except OSError as exc:
+        log("미분류 재판독 — 파일을 옮기지 못해 그대로 둡니다: %s (%s)" % (src, exc), log_dir)
+        return "error", ""
+    return "moved", path
+
+
+def reclassify_unfiled(root, cache, master, log_dir=None, state_path=None):
+    """기동 시 1회 — _미분류 에 남은 메일을 다시 판독해 제 폴더로 옮긴다(멱등).
+
+    돌려주는 값: {"reclassified": [{folder, code, voyage, files}], "moved": 파일수,
+                 "skipped": 중복스킵 파일수, "left": 남은 폴더수, "errors": 정수}
+    """
+    result = {"reclassified": [], "moved": 0, "skipped": 0, "left": 0, "errors": 0,
+              "codes": []}
+    if not root or not os.path.isdir(root):
+        log("미분류 재판독 — 메일박스 폴더가 없습니다: %s" % root, log_dir)
+        return result
+    base = os.path.join(root, UNCLASSIFIED_DIR)
+    if not os.path.isdir(base):
+        log("미분류 재판독 — %s 폴더가 없습니다(재판독할 것이 없습니다)." % UNCLASSIFIED_DIR, log_dir)
+        return result
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError as exc:
+        log("미분류 재판독 — 폴더를 읽지 못했습니다(%s): %s" % (base, exc), log_dir)
+        result["errors"] += 1
+        return result
+
+    for name in entries:
+        folder = os.path.join(base, name)
+        if not os.path.isdir(folder):
+            continue
+        try:
+            files = sorted(f for f in os.listdir(folder)
+                           if os.path.isfile(os.path.join(folder, f)))
+        except OSError as exc:
+            log("미분류 재판독 — 폴더를 읽지 못해 그대로 둡니다: %s (%s)" % (folder, exc), log_dir)
+            result["errors"] += 1
+            result["left"] += 1
+            continue
+        target = read_mail_target(unfiled_subject(name), files, cache, master)
+        if not target["ok"]:
+            result["left"] += 1                       # 지금도 못 읽는다 — 추측하지 않고 그대로 둔다
+            continue
+        code = target["code"]
+        if not tally_enabled(cache, code):
+            # 검수 대상 체크를 끈 선박 — _기타 는 무접촉이 원칙이다. 옮기지 않고 그대로 둔다.
+            log("미분류 재판독 — 대상 아님(체크 끔)이라 그대로 둡니다: %s → %s %s"
+                % (name, code, target["voyage"]), log_dir)
+            result["left"] += 1
+            continue
+        voy_dir = voyage_dirname(root, [code], target["voyage"])   # 0.5-01 표기 규칙 그대로
+        dst = os.path.join(root, safe_name(code), safe_name(voy_dir))
+        try:
+            os.makedirs(dst, exist_ok=True)
+        except OSError as exc:
+            log("미분류 재판독 — 폴더를 만들지 못해 그대로 둡니다: %s (%s)" % (dst, exc), log_dir)
+            result["errors"] += 1
+            result["left"] += 1
+            continue
+        moved_here = 0
+        for fname in files:
+            status, _path = move_file_into(os.path.join(folder, fname), dst, log_dir)
+            if status == "moved":
+                moved_here += 1
+                result["moved"] += 1
+            elif status == "skipped":
+                result["skipped"] += 1
+            else:
+                result["errors"] += 1
+        if moved_here:
+            result["reclassified"].append({"folder": name, "code": code, "vessel": target["vessel"],
+                                           "voyage": voy_dir, "files": moved_here,
+                                           "source": target["source"]})
+            if code not in result["codes"]:
+                result["codes"].append(code)
+            log("미분류 재판독 — %s → %s/%s · 파일 %d개 이동 [%s]"
+                % (name, code, voy_dir, moved_here, target["source"]), log_dir)
+        else:
+            log("미분류 재판독 — %s 은(는) %s/%s 에 이미 있습니다(그대로 둡니다)."
+                % (name, code, voy_dir), log_dir)
+        try:
+            if os.path.isdir(folder) and not os.listdir(folder):
+                os.rmdir(folder)                       # 빈 폴더만 치운다(파일이 남으면 실패하고 남는다)
+                log("미분류 재판독 — 빈 폴더를 치웠습니다: %s" % folder, log_dir)
+        except OSError as exc:
+            log("미분류 재판독 — 빈 폴더를 치우지 못해 그대로 둡니다: %s (%s)" % (folder, exc), log_dir)
+        if os.path.isdir(folder):
+            result["left"] += 1
+
+    # 옮긴 선박은 업로드 지문을 무효화한다 — 다음 백필에서 그 항차가 앱에 다시 오른다.
+    if result["codes"] and state_path:
+        try:
+            state = app_upload.load_state(state_path)
+            touched = set(result["codes"])
+            drop = [rel for rel in list(state["folders"])
+                    if str(rel).split("/")[0].strip().upper() in touched]
+            for rel in drop:
+                state["folders"].pop(rel, None)
+            if drop:
+                app_upload.save_state(state, state_path, lambda msg: log(msg, log_dir))
+                log("미분류 재판독 — 업로드 지문 %d건 무효화(다음 백필에서 다시 올립니다): %s"
+                    % (len(drop), ", ".join(sorted(drop))), log_dir)
+        except Exception as exc:                       # 지문 무효화가 죽어도 이동 결과는 살린다
+            log("미분류 재판독 — 업로드 지문 무효화 실패: %s: %s" % (type(exc).__name__, exc), log_dir)
+            result["errors"] += 1
+
+    log("미분류 재판독 완료 — 재분류 %d폴더 · 이동 %d파일 · 이미있음 %d파일 · 잔류 %d폴더 · 실패 %d건"
+        % (len(result["reclassified"]), result["moved"], result["skipped"],
+           result["left"], result["errors"]), log_dir)
+    return result
+
+
 # ──────────────────────────── 메일 해석 ────────────────────────────
 
 def decode_header_text(value):
@@ -1344,6 +1525,7 @@ class Collector:
         self.cache = load_cache(self.cache_path)
         self.master = load_master(self.master_path)
         self._migrated = False                       # 기동 후 첫 사이클 직전에 한 번만 이관
+        self._reclassified = False                   # 0.7-01 — 미분류 재판독(기동 후 1회)
         self._plan_reconciled = False                # 0.6 — 배정표로 서버 항차 맞추기(기동 후 1회)
         self.uidl_cache = load_uidl_cache(self.uidl_cache_path)
         self.firebase = firebase if firebase is not None else FirebaseREST(self.cfg.get("firebase"))
@@ -1379,6 +1561,27 @@ class Collector:
                 self.log_dir)
         return result
 
+    # ── 기동 시 1회 재판독(0.7-01) ──
+    def reclassify_once(self, root):
+        """첫 사이클 직전에 한 번 — 정본표가 오기 전 _미분류 로 떨어진 메일을 다시 판독해 옮긴다.
+
+        정본표가 없어도 돌린다(자동 판독만으로 읽히는 것도 있다). 실패해도 수집은 계속한다.
+        """
+        if self._reclassified:
+            return None
+        self._reclassified = True
+        try:
+            result = reclassify_unfiled(root, self.cache, self.master,
+                                        log_dir=self.log_dir,
+                                        state_path=self.upload_state_path)
+        except Exception as exc:                     # 재판독이 죽어도 수집은 계속한다
+            log("미분류 재판독 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc),
+                self.log_dir)
+            return None
+        if result.get("reclassified"):
+            save_cache(self.cache, self.cache_path)  # 재판독으로 알게 된 선박을 캐시에 남긴다
+        return result
+
     # ── 한 사이클 ──
     def run_cycle(self):
         root = self.cfg.get("mailbox_root") or ""
@@ -1387,6 +1590,7 @@ class Collector:
             return {"error": "mailbox_root 없음"}
         os.makedirs(root, exist_ok=True)
         self.migrate_once(root)
+        self.reclassify_once(root)                   # 0.7-01 — 정본표 이관 뒤에 미분류를 다시 읽는다
 
         summary ={"at": _now_iso(), "mails": 0, "files": 0, "skipped": 0,
                    "unclassified": 0, "old_skipped": 0, "vessels": [], "errors": 0}
