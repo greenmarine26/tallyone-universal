@@ -50,18 +50,19 @@ export default function MailboxFilePicker({ vessel, voy, voyageKey, mode, onEdi,
     if (!use) return;
     setErr('');
     try {
-      const r = await listVoyageFiles(use, vessel, voy);
+      // TallyUni 0.7 (TallyOne 1.11 이식): mode 를 넘긴다 — `2606N(D)` / `2606N(L)` 방향별 폴더를 먼저 찾기 위해서.
+      const r = await listVoyageFiles(use, vessel, voy, mode);
       setRes(r);
     } catch (e) {
       // 조용히 실패하지 않는다 — 왜 안 보이는지 화면에 남긴다
       setErr(`폴더를 읽지 못했습니다: ${e && e.message ? e.message : e}`);
       setRes(null);
     }
-  }, [root, vessel, voy]);
+  }, [root, vessel, voy, mode]);
 
   useEffect(() => {
     if (perm === 'granted' && root) load(root);
-  }, [perm, root, vessel, voy, load]);
+  }, [perm, root, vessel, voy, mode, load]);
 
   useEffect(() => { setDone(getDoneSet(voyageKey, mode)); }, [voyageKey, mode]);
 

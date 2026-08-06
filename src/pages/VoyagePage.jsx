@@ -30,7 +30,7 @@ import BayDictVerifyWidget from '../components/BayDictVerifyWidget.jsx';
 import ReportTab from '../components/ReportTab.jsx';
 import ContainerDetailModal from '../components/ContainerDetailModal.jsx';
 import WorkReportModal from '../components/WorkReportModal.jsx';
-import { getEquipNumber, isPyeongtaekPort, resolveShipKey } from '../utils.js';
+import { getEquipNumber, isPyeongtaekPort, isOppositeDirRecord, ownDirCns, resolveShipKey } from '../utils.js';
 import DiagnosticsPanel from '../components/DiagnosticsPanel.jsx';
 import ShipIntroCard from '../components/ShipIntroCard.jsx';   // V9.18: 선박 소개·이름 유래
 import ConflictReviewModal from '../components/ConflictReviewModal.jsx';
@@ -172,7 +172,19 @@ export default function VoyagePage({ voyageKey, voyage, inspector, inspectors, p
 
   const sec = voyage[mode] || {};
   const ediMap = sec.ediContainers || {};
-  const recMap = sec.records || {};
+  // TallyUni 0.7 (TallyOne 1.11 이식): 이 화면 몫의 리스트만 본다 — POL/POD 로 **반대 방향이 확정된**
+  //   레코드는 뺀다. 항차번호가 방향까지 같은 배(N_N 타입)는 메일함 폴더가 하나라 양하·선적 리스트가
+  //   섞여 들어와, 양하 records 에 선적분이 얹혀 있었다(SWSP 2606N: 371 + 407 = 778 로 표시, 2026-08-06 실측).
+  //   유입은 autoRegApi·handleListUpload 에서 막지만, **이미 저장된 오염분**은 여기서 걸러야
+  //   컨 목록·평택 판정·요약이 함께 바로잡힌다. 근거 없는 레코드(POL/POD 없음)는 그대로 둔다.
+  const recMapRaw = sec.records || {};
+  const recMap = useMemo(() => {
+    const own = ownDirCns(recMapRaw, mode);
+    if (own.length === Object.keys(recMapRaw).length) return recMapRaw;   // 오염 없음 — 원본 그대로(참조 유지)
+    const out = {};
+    own.forEach(cn => { out[cn] = recMapRaw[cn]; });
+    return out;
+  }, [recMapRaw, mode]);
   const xrayMap = sec.xrayList || {};
   const xraySeals = sec.xraySeals || {};
   const compMap = sec.completed || {};
@@ -2463,6 +2475,16 @@ function DataTab({ voyageKey, mode, voyage, setMode, inspector }) {
       } catch (e) {
         results.push(`❌ ${file.name}: ${e.message}`);
       }
+    }
+
+    // TallyUni 0.7 (TallyOne 1.11 이식): **반대 방향 리스트 배제** — 수동 업로드에도 같은 방어를 건다.
+    //   자동등록(autoRegApi)만 막으면, 같은 폴더의 합본을 손으로 올렸을 때 그대로 합산된다.
+    //   레코드의 POL/POD 로 반대 방향이 확정된 것만 뺀다(근거 없으면 유지). 뺐으면 화면에 알린다 —
+    //   말없이 줄어들면 검수사가 리스트가 모자란 줄 알고 다시 올린다.
+    const dirDropped = Object.keys(cnMap).filter(cn => isOppositeDirRecord(cnMap[cn], mode));
+    dirDropped.forEach(cn => { delete cnMap[cn]; });
+    if (dirDropped.length) {
+      results.push(`↩️ ${mode === 'discharge' ? '선적' : '양하'} 리스트 ${dirDropped.length}대 제외 — ${mode === 'discharge' ? 'POL' : 'POD'}만 모항인 컨은 이 화면 몫이 아닙니다`);
     }
 
     // M3.5.4-fix2: 충돌 검출 — EDI vs 리스트 비교

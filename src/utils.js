@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.6';   // QR 원터치 접속 — 링크(?cfg=)로 접속 설정 자동 완료
+export const APP_VERSION = 'TallyUni 0.7';   // N_N 방향 수리 — 한 폴더에 섞여 온 양하·선적 리스트 분리 + 모항 코드 변형(PTK02·PYONGTAEK) 인식
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가
@@ -3050,22 +3050,50 @@ export function buildContainerColorMap(containers, mode) {
 //   기본 테넌트(KRPTK)는 아래 확장 변형·접미 규칙을 그대로 유지 — 동작 완전 보존.
 //   타 테넌트는 그 테넌트의 별칭(+3자 접미)만 본다. 함수명·시그니처는 그대로(호출부 무수정).
 const PYEONGTAEK_CODES = ['PTK', 'KRPTK', 'KRPYT', 'PYT', 'KRPYOTM', 'PYOTM', 'KRPYO'];
-const PYEONGTAEK_SUFFIX = /(PTK|PYT|PYOTM|PYO)$/;
+// TallyUni 0.7 (TallyOne 1.11 이식): 실 리스트에 들어 있는 모항 표기 전수 조사(2026-08-06,
+//   RTDB voyages 17항차 records). 실측 변형과 종전 판정 결과:
+//     KRPTK 1401건 ✓ / PTK 61건 ✓ / PTK02 407건 ✗ / PYEONGTAEK 71건 ✗ /
+//     PYONGTAEK 25건 ✗ / PYEONGTAEK,KOREA 5건 ✗ / PYONGTAEK,KOREA 3건 ✗
+//   → 511건이 모항인데 모항이 아닌 것으로 판정되고 있었다. 선석번호 접미(PTK02 = 평택 2부두)와
+//   철자 그대로 쓰는 리스트(PYONGTAEK/PYEONGTAEK, 뒤에 국가명이 붙기도 한다)를 흡수한다.
+const PYEONGTAEK_SUFFIX = /(PTK|PYT|PYOTM|PYO)\d{0,2}$/;    // 선석번호 두 자리까지 허용(PTK02·KRPTK1)
+const RE_PTK_SPELL = /^(KR)?P(Y|YE)ONGTAEK$/;               // PYONGTAEK · PYEONGTAEK · KRPYEONGTAEK
+// 항구 코드 표기 정리 — 'PYONGTAEK,KOREA' · 'PYEONGTAEK(KR)' 처럼 뒤에 국가·부연이 붙어 오는
+//   리스트가 있다. 앞토막만 보고 공백·마침표를 지운다. 테넌트와 무관한 표기 정규화다.
+function _portToken(code) {
+  const t0 = String(code || '').toUpperCase().trim();
+  if (!t0) return '';
+  return t0.split(/[,/(]/)[0].replace(/[\s.]/g, '').trim();
+}
+// 선석번호 접미(두 자리까지) 제거 — PTK02 → PTK, KRPTK1 → KRPTK. 남는 몸통이 3자 미만이면 안 자른다.
+function _stripBerthNo(t) {
+  const m = /^(.*?)(\d{1,2})$/.exec(t);
+  return (m && m[1].length >= 3) ? m[1] : t;
+}
 export function isPyeongtaekPort(code) {
   if (!code) return false;
-  const t = String(code).toUpperCase().trim();
+  const t = _portToken(code);
   if (!t) return false;
   const T = tenant();
   const aliases = [T.homePort, ...(T.homePortAliases || [])]
     .filter(Boolean).map((a) => String(a).toUpperCase().trim());
   if (aliases.includes(t)) return true;
+  // 선석번호가 붙은 별칭도 모항이다 — 기본 테넌트의 PTK02 와 같은 사정이 타 테넌트에도 있다.
+  const tBase = _stripBerthNo(t);
+  if (tBase !== t && aliases.includes(tBase)) return true;
   if (T.homePort === TENANT_DEFAULTS.homePort) {
     if (PYEONGTAEK_CODES.includes(t)) return true;
-    // 접미 매칭: ...PTK, ...PYT, ...PYOTM, ...PYO 로 끝나면 평택
+    if (RE_PTK_SPELL.test(t)) return true;                 // 철자 그대로 쓴 리스트
+    // 접미 매칭: ...PTK, ...PYT, ...PYOTM, ...PYO (+ 선석번호 두 자리까지) 로 끝나면 평택
     return PYEONGTAEK_SUFFIX.test(t);
   }
-  // 타 테넌트: 별칭의 3자 접미로 끝나면 모항 (KRPUS ↔ PUS)
-  return aliases.some((a) => a.length >= 3 && t.endsWith(a.length > 3 ? a.slice(-3) : a));
+  // 타 테넌트: 별칭의 3자 접미로 끝나면 모항 (KRPUS ↔ PUS ↔ PUS02).
+  //   철자 표기(BUSAN·BUSAN,KOREA)는 그 테넌트가 homePortAliases 에 넣어 쓴다 — 위 별칭 비교가 받는다.
+  return aliases.some((a) => {
+    if (a.length < 3) return false;
+    const suf = a.length > 3 ? a.slice(-3) : a;
+    return t.endsWith(suf) || tBase.endsWith(suf);
+  });
 }
 
 // ─── V9.57: 공용 헬퍼 신설 (감사 F6) — 흩어진 지역 규칙의 단일 소스 ──────────
@@ -3087,6 +3115,35 @@ export function voyEq(a, b) {
 export function isPtk(c, mode) {
   if (!c) return false;
   return mode === 'discharge' ? isPyeongtaekPort(c.pod) : !!(c._inList || isPyeongtaekPort(c.pol));
+}
+
+/**
+ * TallyUni 0.7 (TallyOne 1.11 이식): 리스트 레코드가 **반대 방향**으로 확정되는가
+ *   (합산 오류 차단 단일 소스).
+ *
+ * 왜 필요한가 — 항차번호가 방향까지 같은 배(N_N 타입: 양하 2606N · 선적 2606N)는 수집기가
+ *   메일함 폴더를 하나로 만들어서 양하 리스트와 선적 리스트가 한 폴더에 섞인다. 그 폴더를
+ *   통째로 등록하면 두 리스트가 한 mode 로 합산됐다.
+ *   실측(SWSP 2606N, 2026-08-06): 양하 카드가 `평택 778` — 양하 371 + 선적 407 이었다.
+ *
+ * 판정 근거는 레코드 자신의 POL/POD 다. 실데이터에서 두 리스트는 깨끗이 갈린다:
+ *   양하 371건 → pod=KRPTK, pol=VNSGN/THBKK/THLCH
+ *   선적 349건 → pol=PTK02, pod=KRKAN/CNNKG/…
+ *
+ * **확정된 것만 뺀다.** POL/POD 가 없거나(구형 리스트) 둘 다 모항이면(환적) 근거가 없으므로
+ *   유지한다 — 근거 없이 버리면 리스트가 통째로 사라진다(정보 손실 금지).
+ */
+export function isOppositeDirRecord(r, mode) {
+  if (!r || (mode !== 'discharge' && mode !== 'loading')) return false;
+  const podPtk = isPyeongtaekPort(r.pod);
+  const polPtk = isPyeongtaekPort(r.pol);
+  if (podPtk === polPtk) return false;            // 근거 없음(둘 다 아님 / 둘 다 모항) → 유지
+  return mode === 'discharge' ? polPtk : podPtk;  // 양하인데 POL만 모항 = 선적분, 반대도 같다
+}
+
+/** 반대 방향 레코드를 걸러낸 컨번호 목록 — 카운트 모수·컨테이너 병합이 함께 쓴다. */
+export function ownDirCns(records, mode) {
+  return Object.keys(records || {}).filter(cn => !isOppositeDirRecord(records[cn], mode));
 }
 
 // 컨번호 형식 검사 단일 소스 (ISO 6346: 알파벳 4 + 숫자 7)

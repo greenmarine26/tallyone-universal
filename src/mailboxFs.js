@@ -138,8 +138,26 @@ export function isNoise(name) {
  * 반환 { ok, dirPath, files:[{name,size,at,target,handle}], dirs, reason }
  *   ok=false 여도 dirs(고를 수 있는 폴더 목록)를 같이 준다 — 왜 못 찾았는지 사용자가 바로 본다.
  */
-export async function listVoyageFiles(root, vessel, voy) {
+export async function listVoyageFiles(root, vessel, voy, mode) {
   if (!root) return { ok: false, reason: 'no-root', files: [], dirs: [] };
+
+  // TallyUni 0.7 (TallyOne 1.11 이식): 방향별 항차 폴더 `2606N(D)` · `2606N(L)` 를 먼저 찾는다.
+  //   왜 — 다른 배는 양하 항차와 선적 항차의 번호가 달라서 폴더가 저절로 갈린다(2643E · 2634W).
+  //   그런데 항차번호가 방향까지 같은 배(N_N 타입: 양하 2606N · 선적 2606N)는 폴더가 하나로 묶여
+  //   양하 리스트와 선적 리스트가 한 폴더에 섞였고, 그 폴더를 통째로 등록하면 두 리스트가
+  //   한쪽으로 합산됐다(SWSP 2606N: 양하 371 + 선적 407 = 778, 2026-08-06 실측).
+  //   검수사 확정 규칙(2026-08-06): **폴더만** `2606N(D)` / `2606N(L)` 로 나누고, 서류 표기는 `2606N` 그대로.
+  //   기존 단일 폴더(`2606N`)도 계속 찾는다 — 이미 쌓인 메일함이 그대로 열려야 한다.
+  //   폴더를 **만드는** 쪽은 수집기 몫이다 — 앱은 읽는 쪽 폴백만 담당한다.
+  const dirTag = mode === 'discharge' ? 'D' : mode === 'loading' ? 'L' : '';
+  const voyNames = dirTag ? [`${voy}(${dirTag})`, voy] : [voy];
+  const findVoyDir = async (parent) => {
+    for (const nm of voyNames) {
+      const hit = await findDir(parent, nm);
+      if (hit) return hit;
+    }
+    return null;
+  };
 
   // V9.47: **어느 층을 연결했든** 찾아간다. 검수사가 MAILBOX를 고를 수도, 선박 폴더를 고를 수도,
   //   그 항차 폴더를 바로 고를 수도 있다. 한 가지만 맞다고 우기면 "안 되네" 로 끝난다.
@@ -149,14 +167,14 @@ export async function listVoyageFiles(root, vessel, voy) {
   let yDir = null, base = '';
   const vDir = await findDir(root, vessel);
   if (vDir) {
-    const y = await findDir(vDir.handle, voy);
+    const y = await findVoyDir(vDir.handle);
     if (y) { yDir = y; base = `${vDir.name}/${y.name}`; }
   }
   if (!yDir) {
-    const y2 = await findDir(root, voy);                       // ② 선박 폴더를 연결했다
+    const y2 = await findVoyDir(root);                         // ② 선박 폴더를 연결했다
     if (y2) { yDir = y2; base = `${root.name || ''}/${y2.name}`; }
   }
-  if (!yDir && norm(root.name) === norm(voy)) {                // ③ 항차 폴더를 연결했다
+  if (!yDir && voyNames.some(nm => norm(root.name) === norm(nm))) {   // ③ 항차 폴더를 연결했다
     yDir = { name: root.name, handle: root };
     base = root.name;
   }

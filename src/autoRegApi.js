@@ -3,7 +3,7 @@
 //   - ediContainers 분류는 VoyagePage 재처리 로직과 동일(평택 POD/POL → discharge/loading, 그 외 transit).
 //   - records는 원시 파싱 결과만 반환(먼저 온 값 유지 + 빈칸 채움). 기존 records와의 병합·보존은 수집기 측 보수 머지 담당.
 //   - Firebase 쓰기는 여기서 하지 않는다 — 순수 함수라 시뮬·헬퍼 재사용이 쉽다.
-import { parseBAPLIE, parseAscFile, parseListExcel, isPyeongtaekPort, loadSheetJS } from './utils.js';
+import { parseBAPLIE, parseAscFile, parseListExcel, isPyeongtaekPort, isOppositeDirRecord, loadSheetJS } from './utils.js';
 import { APP_VERSION } from './utils.js';
 
 // V9.57(G5): 파일 분류기 단일화 — mergeApi.classify와 이 _kind가 서로 달라(cdl 허용·.txt 지원·
@@ -301,6 +301,20 @@ export async function buildAutoPayload(files, opts) {
     });
   }
 
+  // TallyUni 0.7 (TallyOne 1.11 이식): **반대 방향 리스트 배제** — 합산 오류의 유입 차단점.
+  //   항차번호가 방향까지 같은 배(N_N 타입)는 메일함 폴더가 하나라 양하·선적 리스트가 같이 들어온다.
+  //   그대로 두면 두 리스트가 이 mode 의 records 로 합산된다(SWSP 2606N: 371+407=778, 2026-08-06 실측).
+  //   레코드 자신의 POL/POD 로 **반대 방향이라고 확정된 것만** 뺀다 — 근거 없는 레코드는 유지한다.
+  //   조용히 버리지 않는다: 뺀 건수는 counts.recordsDropped·perFile 로 드러내고 콘솔에도 남긴다.
+  const droppedCns = [];
+  for (const cn of Object.keys(records)) {
+    if (isOppositeDirRecord(records[cn], mode)) { droppedCns.push(cn); delete records[cn]; }
+  }
+  if (droppedCns.length) {
+    perFile.push({ name: `반대 방향 리스트 제외(${mode === 'discharge' ? '선적분' : '양하분'})`, kind: 'dropped', count: droppedCns.length });
+    console.warn(`[autoRegApi] ${mode} 등록에서 반대 방향 레코드 ${droppedCns.length}대 제외 — 같은 폴더에 양하·선적 리스트가 함께 있다:`, droppedCns.slice(0, 10));
+  }
+
   // 가상 선적 EDI(RZOR·OBWH) — 선적인데 진짜 EDI가 없으면(best 없음) 리스트를 선적 ediContainers로 승격한다.
   //   POL 평택으로 채워 대시보드 선적 카운트(_ptkCountOfSection·POL평택)에 잡히게. _virtualFromList로 '가상/리스트' 배지.
   //   RZOR는 선적 EDI가 안 와 이 가상이 최종. OBWH는 나중에 실 EDI가 오면 best로 잡혀 ediContainers를 덮어씀(자동 마무리).
@@ -340,6 +354,7 @@ export async function buildAutoPayload(files, opts) {
     ediWithCn: Object.keys(ediContainers).filter(k => !k.startsWith('__SLOT')).length,
     ptk: Object.values(ediContainers).filter(c => c._mode === mode).length,
     records: Object.keys(records).length,
+    recordsDropped: droppedCns.length,   // TallyUni 0.7: 반대 방향이라 뺀 리스트 레코드 수
   };
   return {
     ok: !!best || counts.records > 0 || counts.edi > 0,   // V8.84-02: 플랜만 있어도(리스트 아직) 등록 성공
