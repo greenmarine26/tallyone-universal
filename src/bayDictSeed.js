@@ -1,54 +1,74 @@
-// 기본 선박 사전 씨앗 읽기 — TallyUni 0.9
+// 기본 선박 사전 씨앗 읽기 — TallyUni 0.9-01
 //
 // 왜 있나: 새로 설치한 회사의 베이사전이 텅 비어 있으면 첫 배부터 매트릭스를 처음부터
-//   그려야 한다. 검수사 확정 — "현장 정본 앱의 기존 선박 사전을 앱에 넣어 두었다가
-//   설치하면 저장소에 들어가게" 한다. 그 씨앗 파일을 읽는 단 하나의 통로가 이 파일이다.
+//   그려야 한다. 검수사 확정 — "현장 정본 앱의 기존 선박 사전을 설치할 때 저장소에 넣는다".
 //
-// 씨앗은 번들에 상주하지 않는다(710KB). public/seed/ 에 놓고 필요할 때만 fetch 한다.
-//   → 설치 마법사 1회 · 관리자 [기본 사전 가져오기] 버튼 1회. 평소 앱 로딩과 무관.
+// 0.9-01 에서 바뀐 것 — 씨앗 파일은 앱이 스스로 내려받지 않는다.
+//   0.9 는 public/seed/ship_bay_dict_seed.json 을 fetch 했다. 그 파일은 회사가 배를 재서
+//   만든 자산인데, 공개 저장소와 공개 사이트(Pages)에 그대로 실려 누구나 받을 수 있었다.
+//   검수사 확정 = 비공개 전달. 그래서 URL 경로(SEED_PATH·bayDictSeedUrl·fetchBayDictSeed)를
+//   통째로 걷어내고, 사람이 고른 파일 하나를 받아 검증·파싱하는 통로만 남긴다.
+//   씨앗은 저장소 밖에 보관한다.
+//   → 쓰는 곳은 둘뿐이다. 설치 마법사 3단계의 [사전 파일 선택(선택 사항)] ·
+//     베이사전 라이브러리의 관리자 [기본 사전 가져오기] 버튼.
 //
-// 만드는 쪽: tools/make_baydict_seed.cjs (재생성 가능).
+// 만드는 쪽: tools/make_baydict_seed.cjs (재생성 가능, 출력은 저장소 밖으로).
 
-export const SEED_PATH = 'seed/ship_bay_dict_seed.json';
-
-/** 씨앗 파일의 절대 URL — GitHub Pages 하위 경로(/tallyone-universal/)에서도 맞게 풀린다. */
-export function bayDictSeedUrl() {
-  try {
-    return new URL(SEED_PATH, document.baseURI).href;
-  } catch {
-    return './' + SEED_PATH;   // document 가 없는 곳(시뮬 등)
-  }
+/** 파일 하나를 글자로 읽는다. Blob.text()가 없는 환경(구형 웹뷰)은 FileReader 로 내려간다. */
+function readFileText(file) {
+  if (file && typeof file.text === 'function') return file.text();
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader !== 'function') {
+      reject(new Error('이 브라우저에서는 파일을 읽을 수 없습니다(FileReader 없음).'));
+      return;
+    }
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result == null ? '' : fr.result));
+    fr.onerror = () => reject(new Error(`파일을 읽지 못했습니다 — ${fr.error && fr.error.message ? fr.error.message : '읽기 오류'}`));
+    fr.readAsText(file);
+  });
 }
 
 /**
- * 씨앗 내려받기. 실패는 던진다 — 조용히 빈 객체를 돌려주면 "0척 심었다"가 성공처럼 보인다.
- * @param {number} timeoutMs 기본 30초 (배 안 약신호 고려)
- * @returns {Promise<{meta:object, ships:object, codes:string[]}>}
+ * 고른 씨앗 파일을 읽어 검증한다. 실패는 던진다 — 조용히 빈 객체를 돌려주면
+ * "0척 심었다"가 성공처럼 보인다.
+ * @param {File|Blob} file  <input type="file"> 에서 받은 파일
+ * @returns {Promise<{meta:object, ships:object, codes:string[], withBays:number, fileName:string}>}
  */
-export async function fetchBayDictSeed(timeoutMs = 30000) {
-  const url = bayDictSeedUrl();
-  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
-  const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
-  let res;
+export async function readBayDictSeedFile(file) {
+  if (!file) throw new Error('사전 파일을 고르지 않았습니다.');
+  const name = file.name || '사전 파일';
+  if (typeof file.size === 'number' && file.size === 0) throw new Error(`${name} 이(가) 비어 있습니다 (0바이트).`);
+
+  let text;
   try {
-    res = await fetch(url, ctl ? { signal: ctl.signal, cache: 'no-cache' } : { cache: 'no-cache' });
+    text = await readFileText(file);
   } catch (e) {
-    throw new Error(`기본 사전 파일을 받지 못했습니다 (${url}) — ${e && e.name === 'AbortError' ? `${timeoutMs / 1000}초 안에 응답 없음` : (e && e.message) || e}`);
-  } finally {
-    if (timer) clearTimeout(timer);
+    throw new Error(`${name} 을(를) 읽지 못했습니다 — ${(e && e.message) || e}`);
   }
-  if (!res.ok) throw new Error(`기본 사전 파일 응답 HTTP ${res.status} (${url})`);
+  if (!String(text).trim()) throw new Error(`${name} 이(가) 비어 있습니다.`);
+
   let doc;
   try {
-    doc = await res.json();
+    doc = JSON.parse(text);
   } catch (e) {
-    throw new Error(`기본 사전 파일이 JSON 이 아닙니다 (${url}) — ${(e && e.message) || e}`);
+    throw new Error(`${name} 이(가) JSON 이 아닙니다 — ${(e && e.message) || e}`);
   }
-  const ships = doc && doc.ships && typeof doc.ships === 'object' ? doc.ships : null;
-  if (!ships) throw new Error(`기본 사전 파일 형식이 다릅니다 — ships 없음 (${url})`);
+
+  const ships = doc && doc.ships && typeof doc.ships === 'object' && !Array.isArray(doc.ships) ? doc.ships : null;
+  if (!ships) throw new Error(`${name} 의 형식이 다릅니다 — ships 없음. 기본 선박 사전 파일이 맞는지 확인하세요.`);
   const codes = Object.keys(ships);
-  if (codes.length === 0) throw new Error(`기본 사전 파일이 비어 있습니다 (${url})`);
-  return { meta: doc._meta || {}, ships, codes };
+  if (codes.length === 0) throw new Error(`${name} 에 선박이 한 척도 없습니다.`);
+
+  // 베이 정의가 하나도 없는 파일은 사전이 아니다 — 심어 봐야 빈 껍데기만 늘어난다.
+  const withBays = codes.filter((c) => {
+    const e = ships[c];
+    const bs = e && e.bayDef && e.bayDef.baysSummary;
+    return Array.isArray(bs) && bs.length > 0;
+  });
+  if (withBays.length === 0) throw new Error(`${name} 에 베이 정의(bayDef.baysSummary)를 가진 선박이 없습니다.`);
+
+  return { meta: doc._meta || {}, ships, codes, withBays: withBays.length, fileName: name };
 }
 
 /** 사전 맵을 n척씩 끊어 준다 — 한 번에 100척을 던지면 약신호에서 통째로 실패한다. */

@@ -7,7 +7,9 @@ import { Database, ChevronDown, ChevronUp, AlertTriangle, CheckCircle2, Upload, 
 import { fbSubscribeShipBayDict, fbSubscribeShipLibrary, fbBatchSaveShipBayDict } from '../firebase.js';
 import { mergeUserBayDictFrom } from '../data/userBayDict.js';
 // TallyUni 0.9: 이미 설치를 마친 회사가 기본 선박 사전을 뒤늦게 심는 통로.
-import { fetchBayDictSeed, chunkShips } from '../bayDictSeed.js';
+// TallyUni 0.9-01: 씨앗은 앱이 내려받지 않는다(회사 자산 — 공개 사이트에서 내렸다).
+//   버튼을 누르면 파일 선택창이 열리고, 고른 파일을 읽어 심는다. 심는 경로는 0.9 그대로다.
+import { readBayDictSeedFile, chunkShips } from '../bayDictSeed.js';
 import { useCanWriteBayDict } from '../useMatrixPerm.js';
 
 export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onAscUpload }) {
@@ -20,6 +22,7 @@ export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onA
   const { canEdit } = useCanWriteBayDict();
   const [seedBusy, setSeedBusy] = useState(false);
   const [seedMsg, setSeedMsg] = useState('');
+  const seedRef = useRef(null);   // TallyUni 0.9-01: 사전 파일 선택창
 
   useEffect(() => {
     const unsubDict = fbSubscribeShipBayDict(setBayDict);
@@ -112,12 +115,21 @@ export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onA
   // V TallyUni 0.9: 앱에 담아 온 기본 선박 사전(씨앗)을 저장소에 심는다.
   //   이미 저장소에 있는 코드는 건드리지 않는다 — 이 회사가 직접 재서 고친 매트릭스를
   //   씨앗이 덮으면 안 되기 때문이다(건너뛴 수를 결과에 그대로 보고한다).
-  const handleSeedImport = async () => {
+  // TallyUni 0.9-01: 버튼은 파일 선택창만 연다. 실제 심기는 파일을 고른 뒤 아래에서 한다.
+  const openSeedPicker = () => {
     if (!canEdit || seedBusy) return;
+    setSeedMsg('');
+    if (seedRef.current) seedRef.current.click();
+  };
+
+  const handleSeedImport = async (e) => {
+    const file = e && e.target && e.target.files ? e.target.files[0] : null;
+    if (e && e.target) e.target.value = '';        // 같은 파일을 다시 골라도 change 가 뜨게
+    if (!canEdit || seedBusy || !file) return;
     setSeedBusy(true);
     setSeedMsg('기본 사전 파일을 읽는 중…');
     try {
-      const seed = await fetchBayDictSeed();
+      const seed = await readBayDictSeedFile(file);
       const existing = new Set(Object.keys(bayDict || {}));
       const toAdd = {};
       let skipped = 0;
@@ -192,12 +204,13 @@ export default function BayDictLibraryWidget({ onSingleUpload, onBulkUpload, onA
             {/* TallyUni 0.9: 앱이 담아 온 기본 선박 사전을 저장소에 심는다 (관리자 전용) */}
             {canEdit && (
               <>
+                <input ref={seedRef} type="file" accept=".json,application/json" className="hidden" onChange={handleSeedImport} />
                 <button
-                  onClick={handleSeedImport}
+                  onClick={openSeedPicker}
                   disabled={seedBusy}
                   className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-2 bg-lime-700 hover:bg-lime-600 disabled:opacity-50 text-white rounded text-xs font-bold"
                 >
-                  {seedBusy ? '심는 중…' : '🌱 기본 사전 가져오기 (앱 내장본 → 저장소)'}
+                  {seedBusy ? '심는 중…' : '🌱 기본 사전 가져오기 (사전 파일 선택 → 저장소)'}
                 </button>
                 {seedMsg && (
                   <div className="text-[10px] text-lime-200 bg-lime-950/40 border border-lime-800/50 rounded px-2 py-1 whitespace-pre-line">

@@ -1,6 +1,11 @@
-// TallyUni 0.9 시뮬 — 베이사전 시드 + 잠금.
-//   S1 마법사 신규 설치 · S2 두 번째 기기 · S3 관리자 가져오기 · S4 잠금 · S5 회귀(0.7-02)
+// TallyUni 0.9-01 시뮬 — 베이사전 시드(파일 선택 방식) + 0.9 잠금 회귀.
+//   S1 마법사 + 사전 파일 · S1b 파일 없이 설치 · S1c 깨진/빈 파일 · S2 두 번째 기기 ·
+//   S3 관리자 [기본 사전 가져오기](파일 선택) · S4 잠금 · S5 회귀(0.7-02)
 //   실 Firebase 무접촉(firebase/* 는 stub). 실 tallyuni DB 에 아무것도 쓰지 않는다.
+//
+// ⚠ 씨앗 파일은 저장소에 없다(0.9-01 보안 확정 — 회사 자산). 저장소 밖에서 읽는다.
+//   기본 경로: <저장소>/../_baydict_seed/ship_bay_dict_seed.json  (= C:\TALLYTEST\_baydict_seed\)
+//   바꾸려면 SEED_FILE=<경로> 로 준다.
 const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
@@ -8,7 +13,12 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const BUNDLE = fs.readFileSync(process.argv[2], 'utf8');
 const PE_BUNDLE = fs.readFileSync(process.argv[3], 'utf8');
-const SEED = fs.readFileSync(path.join(ROOT, 'public/seed/ship_bay_dict_seed.json'), 'utf8');
+const SEED_FILE = process.env.SEED_FILE || path.join(ROOT, '..', '_baydict_seed', 'ship_bay_dict_seed.json');
+if (!fs.existsSync(SEED_FILE)) {
+  console.error(`✗ 씨앗 파일이 없다: ${SEED_FILE}\n  (저장소 밖 비공개 보관본이다 — SEED_FILE 환경변수로 경로를 주거나 tools/make_baydict_seed.cjs 로 재생성할 것)`);
+  process.exit(1);
+}
+const SEED = fs.readFileSync(SEED_FILE, 'utf8');
 const SEED_DOC = JSON.parse(SEED);
 const BASE = 'https://greenmarine26.github.io/tallyone-universal/';
 
@@ -54,36 +64,40 @@ function makeDom({ url = BASE, pre = {}, seedStatus = 200, seedBody = SEED, bund
 }
 
 (async () => {
-  // ══ S1 · 마법사 신규 설치 ═════════════════════════════════════════════════
-  console.log('\n[S1] 설치 마법사 — 새 회사가 처음 설치했을 때');
+  // 1단계(설정 붙여넣기)를 사람이 하듯 지나 3단계 직전까지 간다 — S1 계열이 모두 쓴다.
+  const toStep2 = async (w) => {
+    await w.__SIM.mountWizard();
+    const ta = w.document.querySelector('textarea');
+    Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype, 'value').set.call(ta, JSON.stringify(CFG));
+    ta.dispatchEvent(new w.Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 200));
+    const nx = [...w.document.querySelectorAll('button')].find((b) => /다음|확인|계속/.test(b.textContent || ''));
+    nx && nx.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+  };
+
+  // ══ S1 · 마법사 신규 설치 + 사전 파일 선택 ════════════════════════════════
+  console.log('\n[S1] 설치 마법사 — 3단계에서 사전 파일을 골랐을 때');
   {
-    const { w, errs, S } = makeDom();
+    const { w, errs } = makeDom();
     w.__SIM.settings = null;               // 처음 여는 프로젝트
     w.__SIM.tree = {};
     w.__gmSimCfg = CFG;
-    // 1단계를 건너뛰기 위해 링크 부팅을 흉내 낸다(getLinkBoot 는 sessionStorage 를 읽는다)
-    // → 대신 1단계 붙여넣기를 직접 채운다.
-    await w.__SIM.mountWizard();
-    const ta = w.document.querySelector('textarea');
-    const proto = w.HTMLTextAreaElement.prototype;
-    Object.getOwnPropertyDescriptor(proto, 'value').set.call(ta, JSON.stringify(CFG));
-    ta.dispatchEvent(new w.Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 200));
-    // [다음] → probe(get settings)=없음 → 2단계
-    const btns = [...w.document.querySelectorAll('button')];
-    const nx = btns.find((b) => /다음|확인|계속/.test(b.textContent || ''));
-    nx && nx.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 400));
-    const res = await w.__SIM.runWizardFinish({ owner: '박정우' });
+    await toStep2(w);
+    const res = await w.__SIM.runWizardFinish({ owner: '박정우', seed: { content: SEED } });
 
     const writes = w.__SIM.writes || [];
     const wpath = (p) => writes.filter(([, path]) => path === p);
+    chk('S1', res.hasSeedInput === true, '3단계에 [사전 파일 선택] 입력이 있다');
+    const pm = (res.picked || '').match(/선박 (\d+)척 확인/);
+    chk('S1', !!pm && Number(pm[1]) === SEED_DOC._meta.count,
+        `고른 즉시 ${SEED_DOC._meta.count}척으로 읽힌다 (실제 ${pm ? pm[1] : '없음'})`);
     chk('S1', wpath('settings').length === 1, `settings 1회 기록 (실제 ${wpath('settings').length})`);
     const me = wpath('matrix_editors')[0];
     chk('S1', !!me && JSON.stringify(me[2]) === JSON.stringify(['박정우']),
         `matrix_editors = ["박정우"] 명시 시딩 (실제 ${me ? JSON.stringify(me[2]) : '없음'})`);
-    chk('S1', (w.__SIM.fetched || []).some((u) => /seed\/ship_bay_dict_seed\.json$/.test(u)),
-        `씨앗 파일 fetch 경로 (${(w.__SIM.fetched || [])[0] || '없음'})`);
+    chk('S1', !(w.__SIM.fetched || []).some((u) => /seed/i.test(u)),
+        `씨앗을 네트워크에서 받지 않는다 (fetch ${(w.__SIM.fetched || []).length}건)`);
     const dictWrites = wpath('ship_bay_dict_v3');
     const seeded = dictWrites.reduce((n, [, , obj]) => n + Object.keys(obj || {}).length, 0);
     chk('S1', seeded === SEED_DOC._meta.count, `사전 ${SEED_DOC._meta.count}척 시딩 (실제 ${seeded}척 · ${dictWrites.length}묶음)`);
@@ -97,30 +111,49 @@ function makeDom({ url = BASE, pre = {}, seedStatus = 200, seedBody = SEED, bund
     chk('S1', errs.length === 0, `렌더 오류 0건 (실제 ${errs.length}${errs[0] ? ' · ' + errs[0] : ''})`);
   }
 
-  // ── S1b · 씨앗을 못 받아도 설치는 끝나고 사유가 보인다
-  console.log('\n[S1b] 설치 마법사 — 씨앗 파일을 못 받았을 때');
+  // ── S1b · 파일을 안 골라도 설치는 그대로 끝난다
+  console.log('\n[S1b] 설치 마법사 — 사전 파일을 고르지 않았을 때');
   {
-    const { w, errs } = makeDom({ seedStatus: 404 });
+    const { w, errs } = makeDom();
     w.__SIM.settings = null; w.__SIM.tree = {};
-    await w.__SIM.mountWizard();
-    const ta = w.document.querySelector('textarea');
-    Object.getOwnPropertyDescriptor(w.HTMLTextAreaElement.prototype, 'value').set.call(ta, JSON.stringify(CFG));
-    ta.dispatchEvent(new w.Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 200));
-    const nx = [...w.document.querySelectorAll('button')].find((b) => /다음|확인|계속/.test(b.textContent || ''));
-    nx && nx.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 400));
-    const res = await w.__SIM.runWizardFinish({ owner: '박정우' });
-    const t = res.text || '';
+    await toStep2(w);
+    const res = await w.__SIM.runWizardFinish({ owner: '박정우' });   // seed 없음
+    const t = res.text || '', s3 = res.step3 || '';
     const writes = w.__SIM.writes || [];
-    chk('S1b', writes.some(([, p]) => p === 'settings'), '회사 설정은 그대로 심긴다(설치 자체는 완료)');
+    chk('S1b', writes.some(([, p]) => p === 'settings'), '회사 설정은 그대로 심긴다(설치 완료)');
     chk('S1b', writes.some(([, p]) => p === 'matrix_editors'), '권한자 명단도 심긴다');
     chk('S1b', !writes.some(([, p]) => p === 'ship_bay_dict_v3'), '사전은 한 척도 안 심긴다');
-    chk('S1b', /기본 선박 사전을 심지 못했습니다/.test(t), '실패 사유가 화면에 뜬다');
-    chk('S1b', /HTTP 404/.test(t), `사유에 원인이 그대로 (${(t.match(/HTTP \d+/) || [])[0] || '없음'})`);
-    chk('S1b', /그래도 시작/.test(t), '[그래도 시작]으로 앱을 열 수 있다');
-    chk('S1b', !!w.localStorage.getItem(TN), '설정은 이 기기에 저장돼 있다');
+    chk('S1b', !/기본 선박 사전을 심지 못했습니다/.test(t), '실패로 취급하지 않는다(경고 없음)');
+    chk('S1b', /고르지 않아도 설치는 끝납니다/.test(s3), '3단계에 "고르지 않아도 설치는 끝납니다" 안내');
+    chk('S1b', /기본 사전 가져오기/.test(s3), '나중에 심는 길(관리자 버튼)을 안내한다');
+    chk('S1b', !(w.__SIM.fetched || []).some((u) => /seed/i.test(u)), '씨앗을 받으러 나가지 않는다');
+    chk('S1b', !!w.localStorage.getItem(TN) && !!w.localStorage.getItem(FB), '설정 2키 저장됨');
     chk('S1b', errs.length === 0, `렌더 오류 0건 (실제 ${errs.length}${errs[0] ? ' · ' + errs[0] : ''})`);
+  }
+
+  // ── S1c · 깨진 JSON / 빈 파일 — 사유가 그 자리에서 드러나고 심지 않는다
+  console.log('\n[S1c] 설치 마법사 — 고른 파일이 깨졌을 때 · 비었을 때 · 다른 JSON 일 때');
+  {
+    const cases = [
+      ['깨진 JSON', '{ "ships": { "AAAA": ', /JSON 이 아닙니다/],
+      ['빈 파일', '', /비어 있습니다/],
+      ['ships 없는 JSON', '{"hello":1}', /ships 없음/],
+      ['빈 ships', '{"ships":{}}', /선박이 한 척도 없습니다/],
+      ['베이 정의 없는 사전', '{"ships":{"AAAA":{"code":"AAAA"}}}', /베이 정의/],
+    ];
+    for (const [label, body, re] of cases) {
+      const { w, errs } = makeDom();
+      w.__SIM.settings = null; w.__SIM.tree = {};
+      await toStep2(w);
+      const res = await w.__SIM.runWizardFinish({ owner: '박정우', seed: { content: body } });
+      const picked = res.picked || '';
+      const writes = w.__SIM.writes || [];
+      chk('S1c', re.test(picked), `${label}: 사유가 고른 자리에서 뜬다 (${(picked.match(/⛔[^\n]{0,60}/) || [])[0] || '없음'})`);
+      chk('S1c', !/척 확인/.test(picked), `${label}: "확인" 표시가 뜨지 않는다`);
+      chk('S1c', !writes.some(([, p]) => p === 'ship_bay_dict_v3'), `${label}: 사전은 한 척도 안 심긴다`);
+      chk('S1c', writes.some(([, p]) => p === 'settings'), `${label}: 설치 자체는 끝난다`);
+      chk('S1c', errs.length === 0, `${label}: 렌더 오류 0건 (실제 ${errs.length}${errs[0] ? ' · ' + errs[0] : ''})`);
+    }
   }
 
   // ══ S2 · 두 번째 기기 ═════════════════════════════════════════════════════
@@ -152,14 +185,15 @@ function makeDom({ url = BASE, pre = {}, seedStatus = 200, seedBody = SEED, bund
     chk('S2', errs.length === 0, `렌더 오류 0건 (실제 ${errs.length}${errs[0] ? ' · ' + errs[0] : ''})`);
   }
 
-  // ══ S3 · 관리자 [기본 사전 가져오기] ══════════════════════════════════════
-  console.log('\n[S3] 베이사전 라이브러리 — 기본 사전 가져오기 버튼');
+  // ══ S3 · 관리자 [기본 사전 가져오기] — 0.9-01: 파일 선택 방식 ═════════════
+  console.log('\n[S3] 베이사전 라이브러리 — 기본 사전 가져오기(파일 선택) 버튼');
   {
-    // ③-a 권한 없는 사람: 버튼 자체가 없다
+    // ③-a 권한 없는 사람: 버튼도 파일 입력도 없다
     const A = makeDom({ pre: { [TN]: { owner: '박정우' }, [FB]: CFG, master_active_inspector_v1: '이검수' } });
     A.w.__SIM.tree = { matrix_editors: ['박정우'], ship_bay_dict_v3: {} };
     await A.w.__SIM.mountLibrary();
     chk('S3', A.w.__SIM.hasSeedButton() === false, '권한 없는 검수원에게는 버튼이 안 보인다');
+    chk('S3', A.w.__SIM.hasSeedInput() === false, '권한 없으면 파일 입력 자체가 없다(우회 경로 없음)');
 
     // ③-b 관리자: 이미 있는 코드는 건너뛴다
     const codes = Object.keys(SEED_DOC.ships);
@@ -171,8 +205,14 @@ function makeDom({ url = BASE, pre = {}, seedStatus = 200, seedBody = SEED, bund
     };
     await B.w.__SIM.mountLibrary();
     chk('S3', B.w.__SIM.hasSeedButton() === true, '관리자에게는 버튼이 보인다');
-    const r = await B.w.__SIM.clickSeedImport();
-    await new Promise((res) => setTimeout(res, 1200));
+    const opened = await B.w.__SIM.clickSeedButton();
+    chk('S3', opened.opened === true, `버튼을 누르면 파일 선택창이 열린다 (opened=${opened.opened})`);
+    chk('S3', (B.w.__SIM.tree.ship_bay_dict_v3 && Object.keys(B.w.__SIM.tree.ship_bay_dict_v3).length) === already.length,
+        '버튼만 눌러서는 아무것도 심기지 않는다');
+    const r = await B.w.__SIM.seedImportFile(SEED);
+    chk('S3', r.found === true, '고른 파일이 심기 경로로 들어간다');
+    await new Promise((res) => setTimeout(res, 300));
+    chk('S3', !(B.w.__SIM.fetched || []).some((u) => /seed/i.test(u)), '씨앗을 네트워크에서 받지 않는다');
     const txt = B.w.document.body.textContent || '';
     const cm = txt.match(/추가 (\d+)척 · 건너뜀 (\d+)척/);
     chk('S3', !!cm, `결과 요약이 뜬다 (${(txt.match(/추가[^·]*·[^·]*/) || [])[0] || '없음'})`);
@@ -187,6 +227,18 @@ function makeDom({ url = BASE, pre = {}, seedStatus = 200, seedBody = SEED, bund
     chk('S3', after[addedCode] && after[addedCode].bayDef.baysSummary.length === SEED_DOC.ships[addedCode].bayDef.baysSummary.length,
         `새로 심은 항목(${addedCode})의 베이 수가 씨앗과 같다 (${after[addedCode] ? after[addedCode].bayDef.baysSummary.length : '?'})`);
     chk('S3', B.errs.length === 0, `렌더 오류 0건 (실제 ${B.errs.length}${B.errs[0] ? ' · ' + B.errs[0] : ''})`);
+
+    // ③-c 관리자가 엉뚱한 파일을 골랐을 때 — 사유가 보이고 저장소는 그대로
+    for (const [label, body, re] of [['깨진 JSON', '{ "ships":', /JSON 이 아닙니다/], ['빈 파일', '', /비어 있습니다/]]) {
+      const C = makeDom({ pre: { [TN]: { owner: '박정우' }, [FB]: CFG, master_active_inspector_v1: '박정우' } });
+      C.w.__SIM.tree = { matrix_editors: ['박정우'], ship_bay_dict_v3: { ZZZZ: { code: 'ZZZZ' } } };
+      await C.w.__SIM.mountLibrary();
+      const rc = await C.w.__SIM.seedImportFile(body, 'broken.json');
+      const t = (rc.text || '');
+      chk('S3', /⛔ 실패/.test(t) && re.test(t), `${label}: 사유를 그대로 보여 준다 (${(t.match(/⛔ 실패:[^\n]{0,50}/) || [])[0] || '없음'})`);
+      chk('S3', Object.keys(C.w.__SIM.tree.ship_bay_dict_v3).length === 1, `${label}: 저장소는 1척 그대로`);
+      chk('S3', C.errs.length === 0, `${label}: 렌더 오류 0건 (실제 ${C.errs.length}${C.errs[0] ? ' · ' + C.errs[0] : ''})`);
+    }
   }
 
   // ══ S4 · 잠금 ════════════════════════════════════════════════════════════

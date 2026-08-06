@@ -92,10 +92,15 @@ cp dist/index.html ./
 # V9.19-02: 마감 텔리 템플릿도 루트로 — Pages는 두 워크플로(Actions dist / 브랜치 루트)가
 #   경합해 마지막에 끝난 쪽이 서빙된다(2026-07-28 실측). 루트·dist 양쪽 다 완전해야 한다.
 [ -d dist/tally_templates ] && rm -rf ./tally_templates && cp -r dist/tally_templates ./
-# TallyUni 0.9: 기본 선박 사전 씨앗도 루트로 — Pages 두 경로(Actions dist / 브랜치 루트) 어느
-#   쪽이 서빙되든 /seed/ship_bay_dict_seed.json 이 있어야 마법사·관리자 버튼이 사전을 심는다.
-# (보안 보류 2026-08-06) 사전 씨앗은 공개 저장소에 싣지 않는다 — 비공개 전달 방식 확정 전까지 복사 중단.
-# [ -d dist/seed ] && rm -rf ./seed && cp -r dist/seed ./ && echo "  ✓ seed/ 루트 복사"
+# TallyUni 0.9-01: 기본 선박 사전 씨앗은 이 빌드가 다루지 않는다(0.9 의 seed/ 복사·검증 삭제 확정).
+#   회사가 배를 재서 만든 자산이라 공개 저장소·공개 사이트(Pages)에 실을 수 없다는 검수사 확정에 따라
+#   ① 저장소·dist·public 어디에도 두지 않고 ② 앱은 사람이 고른 파일을 읽는다(src/bayDictSeed.js).
+#   씨앗 보관: C:\TALLYTEST\_baydict_seed\ 와 드라이브 CLAUDE_SHARED\사전시드_비공개\ (저장소 밖).
+#   재생성: node tools/make_baydict_seed.cjs --out <저장소 밖 경로>
+if [ -e seed ] || [ -e public/seed ] || [ -e dist/seed ]; then
+  echo "✗ seed/ 가 저장소 안에 있다 — 사전 씨앗은 저장소 밖에 둔다(0.9-01 보안 확정). 지우고 다시 빌드할 것"
+  exit 1
+fi
 # 콘앱(독립 파일): dist의 cone.html을 루트로 복사 (Pages가 루트 서빙). 검수앱과 무관.
 [ -f dist/cone.html ] && cp dist/cone.html ./
 # V7.46: 콘앱용 본체 카고플랜 V2 번들 — 같은 소스(PrintableCargoPlanV2+cargoPlanCore+사전)를 React째 번들

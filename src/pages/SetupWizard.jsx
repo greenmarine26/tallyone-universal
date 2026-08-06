@@ -13,8 +13,11 @@
 //   관용 파서·보조 앱(FB_KEYS·FB_REQUIRED·parseFirebaseConfig·withWizardApp) 정의는 linkCfg.js로 옮겼다.
 //   부팅 게이트(main.jsx)가 마법사보다 먼저 그것들을 써야 해서다 — 내용·동작은 0.5와 같다.
 // TallyUni 0.9: 설치가 끝나면 서버가 텅 비어 있지 않다 — 매트릭스 권한자 명단(최초 관리자 1인)과
-//   기본 선박 베이사전 씨앗(public/seed/ship_bay_dict_seed.json)을 함께 심는다. 두 번째 기기
-//   경로(handleUseExisting)는 아무것도 심지 않는다 — 그 회사 서버엔 이미 들어 있다.
+//   기본 선박 베이사전 씨앗을 함께 심는다. 두 번째 기기 경로(handleUseExisting)는 아무것도
+//   심지 않는다 — 그 회사 서버엔 이미 들어 있다.
+// TallyUni 0.9-01: 씨앗은 앱이 내려받지 않는다. 회사 자산이라 공개 사이트에 둘 수 없다(검수사 확정).
+//   3단계에 [사전 파일 선택(선택 사항)]을 두고, 파일을 고른 그 순간에만 심는다.
+//   고르지 않아도 설치는 그대로 끝나며, 사전은 나중에 관리자 버튼으로 심을 수 있다.
 import React, { useState } from 'react';
 import { Anchor, Database, Building2, UserCog, Check, AlertCircle, Image as ImageIcon } from 'lucide-react';
 import { SK } from '../utils.js';
@@ -117,6 +120,11 @@ export default function SetupWizard() {
   const [saveErr, setSaveErr] = useState('');
   // TallyUni 0.9: 사전 시딩 진행 문구 — 96척을 심는 동안 화면이 멈춘 것처럼 보이면 안 된다.
   const [seedMsg, setSeedMsg] = useState('');
+  // TallyUni 0.9-01: 고른 사전 파일을 그 자리에서 읽어 검증해 둔다(설치 버튼을 누른 뒤에
+  //   "파일이 깨졌다"를 알게 되면 늦다). seedDoc 이 null 이면 사전 없이 설치가 끝난다.
+  const [seedDoc, setSeedDoc] = useState(null);
+  const [seedFileErr, setSeedFileErr] = useState('');
+  const [seedReading, setSeedReading] = useState(false);
 
   // TallyUni 0.4: 1단계에서 서버를 먼저 들여다본 결과.
   //   found = DB에 이미 있는 settings(= 다른 기기가 마친 회사 설정), null이면 처음 여는 프로젝트.
@@ -181,6 +189,25 @@ export default function SetupWizard() {
     location.reload();
   };
 
+  // TallyUni 0.9-01: 사전 파일을 고른 즉시 읽어 본다. 깨진 파일·빈 파일·다른 JSON 은
+  //   여기서 사유가 그대로 드러나고, 심기는 시작조차 하지 않는다(조용한 실패 금지).
+  const handleSeedFile = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    setSeedDoc(null);
+    setSeedFileErr('');
+    if (!f) return;
+    setSeedReading(true);
+    try {
+      const { readBayDictSeedFile } = await import('../bayDictSeed.js');
+      const doc = await readBayDictSeedFile(f);
+      setSeedDoc(doc);
+    } catch (err) {
+      setSeedFileErr((err && err.message) ? err.message : String(err));
+    } finally {
+      setSeedReading(false);
+    }
+  };
+
   const handleLogo = async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -213,7 +240,8 @@ export default function SetupWizard() {
   };
 
   const handleFinish = async () => {
-    if (!cfg || !step2Ok || !step3Ok || busy) return;
+    // TallyUni 0.9-01: 사전 파일을 읽는 중이면 기다린다 — 다 읽기 전에 설치를 끝내면 조용히 안 심긴다.
+    if (!cfg || !step2Ok || !step3Ok || busy || seedReading) return;
     setBusy(true);
     setSaveErr('');
     const tcfg = buildTenantCfg();
@@ -244,25 +272,25 @@ export default function SetupWizard() {
         //   그 사이 화면들은 폴백 판정으로 돌았다. 설치 순간 명단이 있는 편이 분명하다.
         await set(ref(wDb, 'matrix_editors'), [tcfg.owner]);
         // TallyUni 0.9 ⓑ: 기본 선박 사전(씨앗)을 ship_bay_dict_v3에 심는다.
-        //   검수사 확정 — "현장 앱의 기존 선박 사전을 앱에 보관해 두었다가 설치하면 저장소에 들어가게".
-        //   실패는 설치를 막지 않는다. 사유는 아래에서 화면에 띄우고, 나중에
-        //   [선박] 탭 → 베이사전 라이브러리 → 🌱 기본 사전 가져오기 로 다시 심을 수 있다.
-        try {
-          setSeedMsg('기본 선박 사전을 내려받는 중…');
-          const { fetchBayDictSeed, chunkShips } = await import('../bayDictSeed.js');
-          const seed = await fetchBayDictSeed();
-          const parts = chunkShips(seed.ships, 25);
-          let done = 0;
-          for (const part of parts) {
-            await update(ref(wDb, 'ship_bay_dict_v3'), part);
-            done += Object.keys(part).length;
-            setSeedMsg(`기본 선박 사전 심는 중… ${done}/${seed.codes.length}척`);
+        //   TallyUni 0.9-01: 3단계에서 파일을 고른 경우에만. 안 골랐으면 그냥 건너뛴다 —
+        //   설치를 막지 않고, 사전은 나중에 [선박] 탭 → 베이사전 라이브러리 →
+        //   🌱 기본 사전 가져오기 로 심을 수 있다.
+        if (seedDoc) {
+          try {
+            const { chunkShips } = await import('../bayDictSeed.js');
+            const parts = chunkShips(seedDoc.ships, 25);
+            let done = 0;
+            for (const part of parts) {
+              await update(ref(wDb, 'ship_bay_dict_v3'), part);
+              done += Object.keys(part).length;
+              setSeedMsg(`기본 선박 사전 심는 중… ${done}/${seedDoc.codes.length}척`);
+            }
+            setSeedMsg(`기본 선박 사전 ${done}척 등록 완료`);
+          } catch (se) {
+            seedWarn = (se && se.message) ? se.message : String(se);
+            console.warn('[SetupWizard] 베이사전 씨앗 심기 실패 — 설치는 계속한다', se);
+            setSeedMsg('');
           }
-          setSeedMsg(`기본 선박 사전 ${done}척 등록 완료`);
-        } catch (se) {
-          seedWarn = (se && se.message) ? se.message : String(se);
-          console.warn('[SetupWizard] 베이사전 씨앗 심기 실패 — 설치는 계속한다', se);
-          setSeedMsg('');
         }
       });
     } catch (e) {
@@ -460,6 +488,31 @@ export default function SetupWizard() {
             <div>
               <label className={LB}>직책</label>
               <input className={IN} value={ownerRole} onChange={(e) => setOwnerRole(e.target.value)} placeholder="수석검수사" />
+            </div>
+            {/* TallyUni 0.9-01: 기본 선박 사전 파일 — 회사 자산이라 앱이 내려받지 않는다. 받은 파일을 여기서 고른다. */}
+            <div>
+              <label className={LB}>기본 선박 사전 파일 (선택 사항)</label>
+              <label className="flex items-center gap-2 bg-slate-900 border border-slate-700 border-dashed rounded-lg px-3 py-3 cursor-pointer hover:border-slate-600">
+                <Database className="w-4 h-4 text-slate-500" />
+                <span className="text-[12px] text-slate-400">
+                  {seedReading ? '사전 파일을 읽는 중…' : seedDoc ? `사전 파일 바꾸기 — ${seedDoc.fileName}` : '사전 파일 선택 (ship_bay_dict_seed.json)'}
+                </span>
+                <input type="file" accept=".json,application/json" className="hidden" onChange={handleSeedFile} />
+              </label>
+              {seedDoc && (
+                <div className="text-[11px] text-emerald-300 mt-1">
+                  ✓ 선박 {seedDoc.codes.length}척 확인 (베이 정의 있는 것 {seedDoc.withBays}척) — 설치할 때 저장소에 심습니다.
+                </div>
+              )}
+              {seedFileErr && (
+                <div className="text-[11px] text-red-400 mt-1 whitespace-pre-line">⛔ {seedFileErr}</div>
+              )}
+              {!seedDoc && !seedFileErr && (
+                <div className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  회사가 따로 받은 기본 선박 사전 파일입니다. <b className="text-slate-400">고르지 않아도 설치는 끝납니다</b> — 나중에
+                  [선박] 탭 → 베이사전 라이브러리 → 🌱 기본 사전 가져오기 에서 심을 수 있습니다.
+                </div>
+              )}
             </div>
             {saveErr && (
               <div className="bg-red-950/50 border border-red-800 rounded-lg p-3 text-red-300 text-[12px] flex gap-2 whitespace-pre-line">

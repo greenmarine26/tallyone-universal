@@ -1,3 +1,10 @@
+# TallyUni 0.9-01 보안: 기본 선박 사전 씨앗은 저장소에 절대 들어오지 않는다(회사 자산).
+#   보관은 저장소 밖 — C:\TALLYTEST\_baydict_seed\ · 드라이브 CLAUDE_SHARED\사전시드_비공개\
+*ship_bay_dict_seed*
+seed/
+public/seed/
+dist/seed/
+
 node_modules/
 dist-planedit/
 dist-apptest/
