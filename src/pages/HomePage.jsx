@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Plus, ArrowDown, ArrowUp, Trash2, Users, ChevronRight, Search, BarChart3, MapPin, Loader2, Anchor, CheckCircle, X } from 'lucide-react';
 import { fbCreateVoyage, fbDeleteVoyage, fbDeleteSection, fbSavePierCoord, fbSubscribePierCoords, fbUpdateVoyageInfo, fbArchiveVoyageBeforeDelete , fbRequestProcessNow, fbSubscribeProcessDone} from '../firebase.js';
 import { detectPierByGps, getPierFromBerth, APP_VERSION, formatBerth, savePierCoord, getStoredPierCoords, isValidBerth, isPyeongtaekPort, ownDirCns, computeShiftingMapCached, parsePortMisDateTime, parseCargoForecast, isVirtualCn } from '../utils.js';
@@ -40,6 +40,45 @@ function lastWorkAt(v) {
   const la = v?.info?.lastActive;    // 검수원 활동 핑
   if (typeof la === 'number' && la > last) last = la;
   return last;
+}
+
+// ── TallyUni 0.10: 홈 카드 둘째 줄 = 작업일시 + 자료 상태 ────────────────────────
+//   판정(무엇을 보여줄지)과 칠하기(어떻게 보여줄지)를 나눈다. 아래 둘은 **순수 함수**라
+//   시뮬이 화면과 똑같은 코드를 돌린다 — 복사본을 시험하면 "시뮬은 통과했는데 화면은 다르다"가 된다.
+
+// 작업일시 문자열. 같은 날 끝나면 종료 시각의 날짜를 생략한다(`08-07 06:00 ~ 21:00`).
+//   ⛔ 작업일시를 따로 보관하지 마라 — _etaMs/_etdMs 는 매 렌더 다시 고른다(V9.35: 아직 안 지난
+//      일정 우선). 일정이 바뀌면 저절로 따라온다. workDateAt 같은 필드를 만들면 옛 값이 굳는다.
+export function workTimeText(voyage) {
+  const two = (n) => String(n).padStart(2, '0');
+  const md = (ms) => { const d = new Date(ms); return `${two(d.getMonth() + 1)}-${two(d.getDate())}`; };
+  const hm = (ms) => { const d = new Date(ms); return `${two(d.getHours())}:${two(d.getMinutes())}`; };
+  const fmt = (ms) => `${md(ms)} ${hm(ms)}`;
+  const eta = voyage?._etaMs, etd = voyage?._etdMs;
+  if (eta && etd) return `${fmt(eta)} ~ ${md(etd) === md(eta) ? hm(etd) : fmt(etd)}`;
+  if (eta) return fmt(eta);
+  if (etd) return `~ ${fmt(etd)}`;
+  return '';
+}
+
+// 자료 상태 판정 — 확정 > 수정본 > 대기중 > 갱신일시 > 갱신 — > 자료 없음.
+//   판정 범위는 **EDI + 리스트 100매칭까지**(검수사 확정 2026-08-06). X-RAY·선적 보충자료는
+//   확정 뒤에 붙는 자료라 세지 않는다.
+//   돌려주는 값: { kind, at } — kind 는 'fixed' | 'revised' | 'waiting' | 'updated' | 'unknown' | 'none'
+export function dataStateOf(voyage) {
+  const fixed = Number(voyage?.info?.dataFixedAt) || 0;
+  const at = Number(voyage?._dataAt) || 0;
+  if (fixed) {
+    // 확정 뒤에 자료가 또 들어왔으면 수정본. **1분 여유가 필요하다** —
+    //   확정 기록과 자료 저장이 거의 동시면 확정하자마자 수정본으로 뒤집힌다.
+    if (at > fixed + 60000) return { kind: 'revised', at };
+    return { kind: 'fixed', at };
+  }
+  // TallyUni 0.10(절차서 ④): 예정 섹션 중 일부만 왔다 — 무엇을 기다리는지 말한다.
+  if (voyage?._waitFor) return { kind: 'waiting', at, waitFor: voyage._waitFor };
+  if (at) return { kind: 'updated', at };
+  if (voyage?._hasData) return { kind: 'unknown', at };   // 자료는 있는데 시각을 모름(구 항차)
+  return { kind: 'none', at };
 }
 
 // V9.57: 항차 핵심번호 비교 — 방향 접미사(E/W/N/S)·앞0·구분자 무시. utils voyCore 승격(팀F) 전까지 지역 헬퍼.
@@ -293,14 +332,51 @@ export default function HomePage({ voyages, inspectors, inspector, portMisData =
           const den = Math.max(ptk.size - slots, rec.size);
           return den > 0 ? { matched, den } : null;
         };
-        const _rs = [_readyOf(v.discharge, 'discharge'), _readyOf(v.loading, 'loading')].filter(Boolean);
-        const _num = _rs.reduce((s, x) => s + x.matched, 0);
-        const _den = _rs.reduce((s, x) => s + x.den, 0);
+        // TallyUni 0.10: 예정 섹션은 **info.voy_d / voy_l 이 진실**이다 (절차서 ④ · 정본 TallyOne 1.13-01).
+        //   0.8 은 예정 섹션을 **섹션 노드 유무**로 짐작했다(`_readyOf` 의 `if (!sec) return null` +
+        //   `.filter(Boolean)`). 그래서 선적 섹션이 아직 안 만들어진 배는 계산에서 통째로 빠져
+        //   "양하 하나만 100%" = 전체 100% 가 됐고, 양하만 온 배가 ✅자료 확정 으로 떴다
+        //   (검수사 신고 2026-08-06: "양하 선적이 이루어지는 선박인데도 자료 확정으로 되어 있습니다").
+        //   ⛔ 교훈 — **구조에서 의도를 추론하지 마라.** 의도는 voy_d/voy_l 에 이미 명시돼 있었다.
+        //   실측(범용 DB 2026-08-06): TNJP_26356E voy_d 26356E·voy_l 26356W 인데 보유는 양하뿐,
+        //   SWDN_2608N·SWSP_2606N 도 같은 모양. 반면 ATPR_2636E 는 voy_d 만, ATPR_2637W 는 voy_l 만 —
+        //   그 한쪽만으로 100% 가 되는 것이 정상이다.
+        const _expect = [];
+        if (info.voy_d) _expect.push('discharge');
+        if (info.voy_l) _expect.push('loading');
+        if (!_expect.length) _expect.push(info.mode === 'loading' ? 'loading' : 'discharge');  // 옛 항차 폴백
+        const _readyBy = { discharge: _readyOf(v.discharge, 'discharge'), loading: _readyOf(v.loading, 'loading') };
+        // TallyUni 0.10(범용판 보강): 선언에 없어도 **자료가 실제로 들어와 있는 섹션**은 예정에 더한다.
+        //   범용 DB 실측 KSKM_2615S — info 에 voy_l 만 있는데 양하 섹션에 EDI 134대가 실제로 올라와 있다.
+        //   선언만 보면 그 134대를 안 세고 선적만으로 100% = ✅확정 이 될 수 있다 — ④가 막으려던 오확정이다.
+        //   ⚠ 방향은 한쪽뿐이다: 예정 섹션을 **더하기만 하고 빼지 않는다.** 더해지는 섹션은 자료가 있으므로
+        //     has:true 이고, 따라서 _missingSection(자가 정리 조건)을 넓히지 않는다.
+        for (const _m of ['discharge', 'loading']) if (_readyBy[_m] && !_expect.includes(_m)) _expect.push(_m);
+        // 섹션마다 완성율을 따로 낸다. 자료가 아직 안 온 예정 섹션은 0.
+        //   가중치는 균등하다 — 아직 안 온 섹션이 몇 대일지 모르므로 대수 가중은 불가능하다.
+        const _sr = _expect.map(m => {
+          const r = _readyBy[m];
+          return { mode: m, ratio: r ? r.matched / r.den : 0, has: !!r };
+        });
+        const _done = _sr.filter(x => x.ratio >= 0.9999);
+        const _wait = _sr.filter(x => x.ratio < 0.9999);
         return { key: k, ...v, _berth: berth, _pier: pier, _rawBerth: rawBerth,
                  _etaMs: _pick ? _pick.eta : null,     // V9.01: 작업시간 근접 정렬용
                  _etdMs: _pick ? _pick.etd : null,
-                 _ready: _den > 0 ? _num / _den : 0,   // TallyUni 0.8: 자료 완성율(정렬 1차)
-                 _hasData: _den > 0,                   // TallyUni 0.8: 자료 유무(정렬 2차)
+                 // TallyUni 0.8 → 0.10: 자료 완성율(정렬 1차). 예정 섹션 평균 — 둘 다 해야 하는 배는 둘 다 채워야 1.0.
+                 _ready: _sr.length ? _sr.reduce((t, x) => t + x.ratio, 0) / _sr.length : 0,
+                 _hasData: _sr.some(x => x.has),       // TallyUni 0.8: 자료 유무(정렬 2차)
+                 // TallyUni 0.10: 일부만 끝났으면 무엇을 기다리는지 — 카드에 '⏳ 선적자료 대기중'
+                 _waitFor: (_done.length > 0 && _wait.length > 0)
+                   ? _wait.map(x => (x.mode === 'discharge' ? '양하' : '선적')).join('·') : '',
+                 // TallyUni 0.10: 예정 섹션 중 자료가 **한 번도 안 들어온** 것이 있는가 — 확정 자격 판정용
+                 _missingSection: _sr.some(x => !x.has),
+                 // TallyUni 0.10: 자료 갱신 시각. 폴백 — dataAt 이 쌓이기 전에 등록된 항차는
+                 //   EDI 업로드 시각이라도 보여준다(리스트만 있는 항차는 '갱신 —').
+                 _dataAt: Math.max(
+                   Number(v.discharge?.dataAt) || 0, Number(v.loading?.dataAt) || 0,
+                   Number(v.discharge?.raw?.edi?.uploadedAt) || 0, Number(v.loading?.raw?.edi?.uploadedAt) || 0,
+                 ),
                  _etaSrc: _pick ? _pick.src : '' };    // V9.35: 작업일시 배지 출처 표기용
       })
       .sort((a, b) => {
@@ -344,6 +420,41 @@ export default function HomePage({ voyages, inspectors, inspector, portMisData =
         );
       }
     });
+  }, [voyagesWithPier]);
+
+  // ── TallyUni 0.10: 자료 확정 시각(info.dataFixedAt) 자동 기록 ─────────────────
+  //   완성율이 **처음** 1.0 이 된 순간을 앱이 적는다. 그 뒤에 자료가 또 들어오면 '✏ 수정본'이 된다.
+  //   ⚠ 이미 있으면 **절대 덮지 않는다.** 덮으면 확정 시각이 계속 최신으로 밀려 수정본이 영영 안 뜬다.
+  //   ⚠ 예정 섹션 중 자료가 한 번도 안 온 것이 있으면(_missingSection) 확정 자격이 없다 — ④의 핵심.
+  const _fixedWrote = useRef(new Set());
+  useEffect(() => {
+    for (const v of voyagesWithPier) {
+      if (!v?.key || (v._ready || 0) < 0.9999) continue;
+      if (v._missingSection) continue;                  // 자료 안 온 예정 섹션이 있으면 확정 아님
+      if (v.info?.dataFixedAt) continue;                // 이미 있으면 덮지 않는다
+      if (_fixedWrote.current.has(v.key)) continue;     // 같은 화면에서 중복 쓰기 방지
+      _fixedWrote.current.add(v.key);
+      fbUpdateVoyageInfo(v.key, { dataFixedAt: Date.now() })
+        .catch(e => console.warn('[dataFixedAt] 자료 확정 시각 기록 실패 —', v.key, e));
+    }
+  }, [voyagesWithPier]);
+
+  // ── TallyUni 0.10: 잘못 찍힌 확정 기록 자가 정리 ─────────────────────────────
+  //   표시 로직을 바꿔도, 그 로직이 이미 써 놓은 dataFixedAt 이 남아 있으면 계속 '확정'으로 뜬다.
+  //   ⛔ 조건을 넓히지 마라. "완성율<1.0 이면 지운다"로 넓히면 정상적인 **수정본**
+  //      (모든 섹션에 자료가 있는데 매칭이 잠깐 어긋난 상태)에서도 확정 기록이 지워져
+  //      수정본 표기가 영영 안 뜬다. 지우는 것은 **예정 섹션 중 자료가 한 번도 안 온 것이 있을 때뿐**이다.
+  const _fixedCleared = useRef(new Set());
+  useEffect(() => {
+    for (const v of voyagesWithPier) {
+      if (!v?.key || !v.info?.dataFixedAt) continue;
+      if (!v._missingSection) continue;                 // ← 조건을 좁게
+      if (_fixedCleared.current.has(v.key)) continue;
+      _fixedCleared.current.add(v.key);
+      console.warn('[dataFixedAt] 자료 없는 예정 섹션이 있어 확정 기록을 지웁니다 —', v.key);
+      fbUpdateVoyageInfo(v.key, { dataFixedAt: null })
+        .catch(e => console.warn('[dataFixedAt] 확정 기록 정리 실패 —', v.key, e));
+    }
   }, [voyagesWithPier]);
 
   // M5.82: 부두별 그룹화 + 현 부두 우선
@@ -1113,24 +1224,44 @@ function VoyageCard({ voyage, activeInspectors, onOpen, onDelete, onComplete, in
             })()}
             {' · '}{voyage.info.carrier || ''}
           </div>
-          {/* 작업일 표시 (수동/자동 삭제 구분용) */}
-          {voyage.info.createdAt && (
-            <div className="text-[11px] text-slate-500 mt-0.5">
-              🗂 등록 {new Date(voyage.info.createdAt).toLocaleDateString('ko-KR', { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-              {(() => {
-                // V8.01: '곧 자동삭제'는 실제 삭제 기준(마지막 작업 활동)과 일치시킨다.
-                //   작업 활동이 없으면 자동삭제 대상이 아니므로 경고를 띄우지 않는다(불안 방지).
-                const worked = lastWorkAt(voyage);
-                const createdDays = Math.floor((Date.now() - voyage.info.createdAt) / 86400000);
-                if (worked > 0) {
-                  const workDays = Math.floor((Date.now() - worked) / 86400000);
-                  if (workDays >= 7) return <span className="text-amber-500 ml-1">· 작업 {workDays}일 전 (곧 자동삭제)</span>;
-                }
-                if (createdDays >= 1) return <span className="ml-1">· {createdDays}일 전</span>;
-                return <span className="ml-1">· 오늘</span>;
-              })()}
-            </div>
-          )}
+          {/* TallyUni 0.10: 등록일자 → **작업일시 + 자료 상태** (절차서 ③④ · 정본 TallyOne 1.13/1.13-01).
+              검수사 2026-08-06: "등록일자 대신에 작업일자를 표기해 주시고 자료 갱신일시를 그 옆에 표기해
+              주세요. 자료가 완성되면 갱신일시를 없애고 **자료 확정**, 확정 후 수정 자료가 있으면 **수정본**."
+              등록일자는 수집기가 예정 등록한 날일 뿐이라 언제 일하는지도 자료가 왔는지도 알려주지 않는다.
+              ⛔ 작업일시를 따로 보관하지 마라 — _etaMs/_etdMs 는 매 렌더 다시 고른다(V9.35: 아직 안 지난
+                 일정 우선). 일정이 바뀌면 저절로 따라온다. workDateAt 같은 필드를 만들면 옛 값이 굳는다.
+              판정 범위는 **EDI + 리스트 100매칭까지** — X-RAY·선적 보충자료는 확정 뒤에 붙는 자료라 안 센다. */}
+          <div className="text-[11px] text-slate-500 mt-0.5">
+            {(() => {
+              const two = (n) => String(n).padStart(2, '0');
+              const fmt = (ms) => { const d = new Date(ms);
+                return `${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`; };
+              const work = workTimeText(voyage);
+              const st = dataStateOf(voyage);      // 판정은 순수 함수가 한다 — 여기선 칠하기만
+              const status =
+                  st.kind === 'revised' ? <span className="ml-1 text-amber-300">· ✏ 수정본 {fmt(st.at)}</span>
+                : st.kind === 'fixed'   ? <span className="ml-1 text-emerald-300">· ✅ 자료 확정</span>
+                : st.kind === 'waiting' ? <span className="ml-1 text-sky-300">· ⏳ {st.waitFor}자료 대기중{st.at ? ` · 갱신 ${fmt(st.at)}` : ''}</span>
+                : st.kind === 'updated' ? <span className="ml-1">· 갱신 {fmt(st.at)}</span>
+                : st.kind === 'unknown' ? <span className="ml-1 text-slate-600">· 갱신 —</span>
+                :                         <span className="ml-1 text-slate-600">· 자료 없음</span>;
+              return (<>
+                🗓 {work ? `작업 ${work}` : '작업일시 미상'}
+                {status}
+                {(() => {
+                  // V8.01: '곧 자동삭제'는 실제 삭제 기준(마지막 작업 활동)과 일치시킨다.
+                  //   작업 활동이 없으면 자동삭제 대상이 아니므로 경고를 띄우지 않는다(불안 방지).
+                  //   ③에서 등록일자만 없앴다 — 이 경고는 그대로 남긴다.
+                  const worked = lastWorkAt(voyage);
+                  if (worked > 0) {
+                    const workDays = Math.floor((Date.now() - worked) / 86400000);
+                    if (workDays >= 7) return <span className="text-amber-500 ml-1">· 작업 {workDays}일 전 (곧 자동삭제)</span>;
+                  }
+                  return null;
+                })()}
+              </>);
+            })()}
+          </div>
         </div>
         <ChevronRight className="w-5 h-5 text-slate-600 flex-shrink-0"/>
       </button>

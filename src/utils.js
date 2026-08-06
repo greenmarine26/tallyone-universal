@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.9-01';   // 베이사전 시드를 파일 선택 방식으로 (씨앗은 저장소 밖 비공개 보관) + 0.9 잠금 유지
+export const APP_VERSION = 'TallyUni 0.10';   // 홈 카드 = 작업일시 + 자료 상태(갱신/✅확정/✏수정본/⏳대기중) — 예정 섹션은 voy_d·voy_l 이 진실
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가

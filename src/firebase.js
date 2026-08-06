@@ -142,6 +142,16 @@ export async function fbSaveSectionData(voyageKey, mode, data) {
 //   - 50대씩 분할 = 1~2초 (트랜잭션 한도 회피)
 export async function fbSaveEdiContainers(voyageKey, mode, containersObj) {
   await chunkedReplace(`voyages/${voyageKey}/${mode}/ediContainers`, containersObj);
+  await _touchDataAt(voyageKey, mode);   // TallyUni 0.10: 자료 갱신 시각
+}
+
+// TallyUni 0.10: 자료 갱신 시각 — 홈 카드가 "갱신 …/✅자료 확정/✏수정본" 을 이 값으로 판정한다.
+//   같은 노드를 수집기(MailPilot Uni 0.12)도 쓴다 — 앱만 쓰면 자동등록분의 갱신이 안 보이고,
+//   수집기만 쓰면 검수사가 직접 올린 자료의 갱신이 안 보인다. **두 쪽이 같이 채워야 의미가 생긴다.**
+//   실패해도 저장 자체를 막지 않되, 조용히 넘기지도 않는다.
+async function _touchDataAt(voyageKey, mode) {
+  try { await set(ref(db, `voyages/${voyageKey}/${mode}/dataAt`), Date.now()); }
+  catch (e) { console.warn('[dataAt] 자료 갱신 시각 기록 실패 —', voyageKey, mode, e); }
 }
 
 // M5.11: EDI 원본 텍스트 보관 — 앱 업데이트 후 자료 재업로드 없이 [🔄 자료 재처리] 가능하게
@@ -263,6 +273,7 @@ export async function fbSaveListRecords(voyageKey, mode, recordsObj) {
   }
   if (kept) console.warn(`[리스트 저장] 새 리스트에 없지만 검수 흔적이 있어 남긴 컨 ${kept}대`);
   await chunkedReplace(path, out);
+  await _touchDataAt(voyageKey, mode);   // TallyUni 0.10: 자료 갱신 시각
   return { total: Object.keys(out).length, kept };
 }
 
