@@ -38,6 +38,9 @@
  27) 0.7-01 미분류 재판독 — 실제 _미분류 폴더 이름 픽스처로 제자리 이동 · 판독 실패 잔류 ·
      _기타(체크 끔) 무접촉 · 같은 크기 스킵 · 다른 크기 '(2)' · 항차 표기 승계 · 빈 폴더만 rmdir ·
      업로드 지문 무효화 범위 · 멱등
+ 28) 0.8 화면 개편 — 좌측 메뉴(여섯 절)·우측 수집 기록 골격 · 절 전환 · 기능 위젯 보존 ·
+     [정본으로 승인](파일 추가·별칭 보존·중복 방지·확인창 '아니오') · 선석배정 상태 표시 ·
+     --autostart 예약 경로 불변
 """
 
 import datetime
@@ -428,6 +431,7 @@ def _install_fake_tkinter():
             return None
 
     tk = types.ModuleType("tkinter")
+    tk.TclError = type("TclError", (Exception,), {})   # 0.8 창 크기 잡기의 except 절이 쓴다
     tk.Tk = FakeTk
     tk.StringVar = FakeVar
     tk.IntVar = FakeVar
@@ -3429,6 +3433,165 @@ def test_reclassify_unfiled():
         shutil.rmtree(log_dir, ignore_errors=True)
 
 
+# ────────────────────── 28) 0.8 화면 개편 — 좌측 메뉴·항목 / 우측 수집 기록 ──────────────────────
+
+def _menu_text(app, key):
+    """메뉴 버튼에 지금 찍힌 글자(가짜 위젯은 configure 로 받은 값을 기억한다)."""
+    button = app.menu_buttons.get(key)
+    kwargs = getattr(button, "kwargs", None)
+    if isinstance(kwargs, dict) and "text" in kwargs:
+        return str(kwargs["text"])
+    try:
+        return str(button.cget("text"))
+    except Exception:
+        return ""
+
+
+def test_gui_layout_and_approve():
+    print("\n[28] 0.8 화면 개편 — 좌우 2단 · 절 전환 · [정본으로 승인]")
+    _install_fake_tkinter()                            # 진짜 창을 띄우지 않는다(무인 실행 안전)
+    import gui
+    import berth_schedule as bsch
+
+    tmp = tempfile.mkdtemp(prefix="mailpilot_ui08_")
+    cfg_path = os.path.join(tmp, "config.json")
+    cache_path = os.path.join(tmp, "vessels_cache.json")
+    master_path = os.path.join(tmp, "vessels_master.json")
+    berth_before = dict(bsch._LAST_FETCH)              # 다른 시험의 기록을 되돌려 놓는다
+    try:
+        # 정본 한 척(별칭·한글 별칭 있음) + 미확인 두 척
+        with open(master_path, "w", encoding="utf-8") as fh:
+            json.dump([{"code": "XTPG", "name": "XIN TAI PING",
+                        "aliases": ["XTP"], "ko": ["일조국제물류"]}], fh, ensure_ascii=False)
+        core.save_cache({"names": {"XIN TAI PING": "XTPG", "SAWASDEE ALTAIR": "SWAL",
+                                   "TAI PING": "TAPN"},
+                         "codes": {"XTPG": "XIN TAI PING", "SWAL": "SAWASDEE ALTAIR",
+                                   "TAPN": "TAI PING"}},
+                        cache_path)
+
+        app = gui.MailPilotGUI(config_path=cfg_path, cache_path=cache_path,
+                               master_path=master_path)
+
+        # ① 골격 — 좌측 메뉴 + 절, 우측 수집 기록
+        check("좌측 메뉴가 여섯 절을 다 잡고 있다",
+              [k for k, _n in gui.SECTIONS] == ["run", "mail", "store", "db", "vessel", "berth"]
+              and sorted(app.menu_buttons) == sorted(k for k, _n in gui.SECTIONS),
+              ", ".join(n for _k, n in gui.SECTIONS))
+        check("절 화면이 메뉴 수만큼 만들어져 있다",
+              sorted(app.section_frames) == sorted(app.menu_buttons),
+              "%d개" % len(app.section_frames))
+        check("우측 수집 기록(로그) 패널이 있다", getattr(app, "txt_log", None) is not None)
+        check("창을 열면 [수집 상태] 절이 보인다", app.current_section == "run", app.current_section)
+        check("보이는 절의 메뉴 글자에만 표식이 붙는다",
+              _menu_text(app, "run").startswith("▶") and not _menu_text(app, "vessel").startswith("▶"),
+              "%s / %s" % (_menu_text(app, "run"), _menu_text(app, "vessel")))
+
+        # ② 절 전환 — 기능 위젯은 어느 절에 있든 그대로 살아 있다
+        check("절을 바꾸면 그 절이 보인다",
+              app.show_section("vessel") == "vessel" and app.current_section == "vessel")
+        check("바뀐 절의 메뉴 글자로 표식이 옮겨간다",
+              _menu_text(app, "vessel").startswith("▶") and not _menu_text(app, "run").startswith("▶"))
+        check("없는 절을 부르면 화면을 바꾸지 않는다",
+              app.show_section("없는절") is None and app.current_section == "vessel")
+        for name in ("btn_run", "btn_organize", "txt_fb", "txt_log", "cvs_vessels",
+                     "frm_vessels", "lbl_condition", "lbl_help", "cmb_provider",
+                     "ent_host", "ent_port", "rb_imap", "rb_pop3", "chk_ssl"):
+            check("기능 위젯 보존 — %s" % name, getattr(app, name, None) is not None)
+        check("수집 조건 문구는 그대로 만들어진다",
+              app.var_condition.get().startswith("지금 조건: 최근 "), app.var_condition.get()[:24])
+
+        # ③ [정본으로 승인] — 미확인 항목을 로컬 정본표에 올린다
+        check("정본에 있는 배는 (미확인) 이 아니다",
+              app.vessel_row_label("XTPG") == "XTPG — XIN TAI PING", app.vessel_row_label("XTPG"))
+        check("정본표에 없는 배는 (미확인) 으로 보인다",
+              app.vessel_row_label("SWAL").endswith("(미확인)"), app.vessel_row_label("SWAL"))
+
+        out = app.approve_master_now("SWAL")
+        with open(master_path, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+        codes = [item.get("code") for item in saved]
+        check("[정본으로 승인] 이 정본표 파일에 항목을 더한다",
+              out is not None and codes == ["XTPG", "SWAL"], ", ".join(codes))
+        check("승인한 항목은 코드·읽어낸 이름으로 적힌다",
+              saved[1]["name"] == "SAWASDEE ALTAIR" and saved[1]["aliases"] == []
+              and saved[1]["ko"] == [],
+              json.dumps(saved[1], ensure_ascii=False))
+        check("먼저 있던 정본의 별칭·한글 별칭은 그대로 남는다",
+              saved[0]["aliases"] == ["XTP"] and saved[0]["ko"] == ["일조국제물류"],
+              json.dumps(saved[0], ensure_ascii=False))
+        check("승인하면 목록이 곧바로 정본으로 갱신된다",
+              app.vessel_row_label("SWAL") == "SWAL — SAWASDEE ALTAIR",
+              app.vessel_row_label("SWAL"))
+        check("승인한 배에는 손질 단추를 더 붙이지 않는다",
+              core.master_by_code(app.vessel_master, "SWAL") is not None)
+
+        # ④ 중복 방지 — 두 번 눌러도 한 줄만 남는다
+        again = app.approve_master_now("SWAL")
+        with open(master_path, "r", encoding="utf-8") as fh:
+            saved2 = json.load(fh)
+        check("이미 정본인 코드를 또 승인해도 늘지 않는다",
+              again is None and len(saved2) == 2, "%d척" % len(saved2))
+        check("이미 정본인 코드는 확인창도 띄우지 않고 끝난다",
+              app.on_approve_master("SWAL") is None)
+
+        # ⑤ 확인창에서 '아니오' 면 파일을 건드리지 않는다(가짜 messagebox 기본값 = 아니오)
+        check("확인창에서 '아니오' 면 정본표에 올리지 않는다",
+              app.on_approve_master("TAPN") is None
+              and core.master_by_code(app.vessel_master, "TAPN") is None)
+        check("확인창 문구에 어디에 적히는지 나온다",
+              master_path in app.approve_message("TAPN", "TAI PING")
+              and "폴더와 파일은 건드리지 않습니다" in app.approve_message("TAPN", "TAI PING"),
+              app.approve_message("TAPN", "TAI PING").splitlines()[0])
+
+        import tkinter.messagebox as mbox
+        yes_before = mbox.askyesno
+        mbox.askyesno = lambda *a, **k: True
+        try:
+            app.collector = _StubCollector({"names": {}, "codes": {}})
+            picked = app.on_approve_master("TAPN")
+        finally:
+            mbox.askyesno = yes_before
+        check("'예' 를 누르면 정본표에 올라간다",
+              picked is not None and core.master_by_code(app.vessel_master, "TAPN") is not None,
+              json.dumps(picked, ensure_ascii=False) if picked else "None")
+        check("수집 중이면 돌고 있는 수집기도 새 정본표를 본다",
+              core.master_by_code(getattr(app.collector, "master", []), "TAPN") is not None)
+        app.collector = None
+
+        # ⑥ 선석배정 상태 — 읽기 표시만(코어 판정에 쓰지 않는다)
+        bsch._LAST_FETCH.update({"at": "", "ok_at": "", "rows": {}, "why": ""})
+        check("아직 읽은 적이 없으면 그렇게 적는다",
+              "아직 선석배정표를 읽은 적이 없습니다" in app.berth_status_text(),
+              app.berth_status_text()[:30])
+        bsch._remember_fetch({"PNCT": 41, "PCTC": 12}, "")
+        text_ok = app._refresh_berth()
+        check("두 터미널을 다 받으면 줄 수를 보여 준다",
+              "PCTC 12줄" in text_ok and "PNCT 41줄" in text_ok
+              and "두 터미널 모두 받았습니다" in text_ok, text_ok.replace("\n", " / "))
+        bsch._remember_fetch({"PNCT": 0, "PCTC": 9}, "PNCT 응답 없음")
+        text_bad = app._refresh_berth()
+        check("실패하면 사유와 마지막 성공 시각을 보여 준다",
+              "실패 사유: PNCT 응답 없음" in text_bad and "마지막 성공: " in text_bad,
+              text_bad.replace("\n", " / "))
+        check("상태 문구는 화면 변수에도 그대로 실린다", app.var_berth.get() == text_bad)
+
+        # ⑦ 무인 기동 경로는 화면을 바꿔도 그대로다
+        app.var_email.set("me@example.com")
+        app.var_password.set("pw")
+        app.var_root.set(tmp)
+        scheduled = []
+        app.master.after = lambda ms, fn=None, *a: (scheduled.append((ms, fn)), "after#ui")[1]
+        check("--autostart 예약 경로 불변",
+              app.request_autostart(delay_ms=77) is True and len(scheduled) == 1
+              and scheduled[0][0] == 77 and scheduled[0][1] == app._autostart_now,
+              "예약 %d건" % len(scheduled))
+    except Exception as exc:
+        check("0.8 화면 개편", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        bsch._LAST_FETCH.update(berth_before)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _read(path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -3482,6 +3645,7 @@ def main():
     test_berth_schedule()
     test_expected_cards()
     test_reclassify_unfiled()
+    test_gui_layout_and_approve()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

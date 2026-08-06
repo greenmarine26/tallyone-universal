@@ -48,6 +48,31 @@ DEFAULT_DAYS_FWD = 7
 #   설정을 안 거친 호출(시험·옛 설정)에서 이 이름이 없으면 NameError 로 사이클이 죽는다.
 DEFAULT_EXCLUDED_ROUTES = ("PXS", "PQS", "JWKP")
 
+# 0.8 — 화면(설정 창)에 「선석배정 상태」를 보여 주기 위한 **읽기 전용** 기록.
+#   판정에는 절대 쓰지 않는다 — fetch_all 이 끝나면서 남기고, GUI 가 사본만 읽어 간다.
+_LAST_FETCH = {"at": "", "ok_at": "", "rows": {}, "why": ""}
+
+
+def last_fetch_status():
+    """마지막 배정표 조회 결과의 사본(화면 표시 전용).
+
+    at    마지막으로 조회를 시도한 시각 · ok_at  마지막으로 두 터미널을 다 받은 시각
+    rows  터미널별 읽어낸 줄 수      · why     실패했다면 그 사유(성공이면 빈 문자열)
+    """
+    return {"at": _LAST_FETCH["at"], "ok_at": _LAST_FETCH["ok_at"],
+            "rows": dict(_LAST_FETCH["rows"]), "why": _LAST_FETCH["why"]}
+
+
+def _remember_fetch(counts, why):
+    """조회 한 판의 결과를 남긴다(표시용) — 여기서 예외가 나도 사이클을 멈추지 않는다."""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _LAST_FETCH["at"] = now
+    _LAST_FETCH["rows"] = dict(counts or {})
+    _LAST_FETCH["why"] = why or ""
+    if not why:
+        _LAST_FETCH["ok_at"] = now
+
+
 _NS = "{http://www.nexacroplatform.com/platform/dataset}"
 
 # PNCT OPR_VVD — `OBWH090(2705E/2706W)` · 한쪽이 빈 `ATPR033(/2636W)` 도 있다.
@@ -397,6 +422,9 @@ def fetch_all(cfg=None, log=None, opener=None, days_back=DEFAULT_DAYS_BACK,
     notes += note
     for line in notes:
         say("  선석배정 — " + line)
+    # 0.8 — 결과를 화면 표시용으로 남긴다(판정에는 쓰지 않는다).
+    _remember_fetch({"PNCT": len(pn or []), "PCTC": len(pc or [])},
+                    " · ".join(r for r in reasons if r))
     if reasons:
         return None, " · ".join(r for r in reasons if r)
     for row in rows:

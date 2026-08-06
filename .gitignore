@@ -15,3 +15,4 @@ mailpilot/__pycache__/
 mailpilot/tests/__pycache__/
 mailpilot/pop_uidl_cache.json
 mailpilot/upload_state.json
+mailpilot/*.tmp

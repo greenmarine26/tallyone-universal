@@ -1,24 +1,41 @@
-# 메일파일럿 Uni 0.5 — 설정·상태 창(tkinter). 메일사 선택 → 계정 입력 → firebaseConfig 붙여넣기 → 수집 시작.
+# 메일파일럿 Uni 0.8 — 설정·상태 창(tkinter). 좌측 메뉴·항목 / 우측 수집 기록.
 # ⚠ 보안: 여기서 입력한 비밀번호는 config.json 에 평문 저장된다. 개인 PC 전용, 공용 PC 금지.
-"""tkinter 설정 창.
+"""tkinter 설정 창 — 0.8 「화면 개편」.
 
-  · 메일사 프리셋(후이즈/회사메일 · 네이버 · 한메일 · 지메일 · 직접입력)
-    — 고르면 방식(IMAP/POP3)·서버·포트·SSL 이 한꺼번에 채워진다. 기본은 후이즈/회사메일(POP3).
-  · 직접입력일 때만 방식·서버·포트·SSL 을 손으로 고칠 수 있다.
-  · 이메일 / 비밀번호(*표시)
-  · firebaseConfig 붙여넣기(앱 설정과 같은 값을 그대로 붙여넣으면 된다)
-  · 메일박스 폴더 선택
-  · [연결 테스트] IMAP: 로그인+폴더 수+최근 3건 / POP3: 로그인+메일 수+최근 3건 제목
-                  · 파이어베이스 익명 인증 + 시험 쓰기
-  · 지금 수집 조건을 한국어로 상시 표시(최근 며칠·주기·받는 첨부·미분류 보존·원본 보존)
-  · 발견된 선박 체크리스트 — 체크를 끄면 그 선박의 새 메일은 _기타 로 간다([폴더 정리]로 기존 폴더도 왕복)
-    · 정본표에 있는 배는 "코드 — 정식 선박명", 없는 배는 "(미확인)" 으로 보인다
-    · 미확인 항목은 [정본 연결…] 로 정본 코드에 합치거나 [항목 삭제] 로 목록에서 뺀다
-    · [정본표 가져오기…] 로 선박 정본표(json)를 등록하면 곧바로 이관까지 돈다
-  · [저장] [수집 시작/중지] · 최근 로그 표시 — 수집 중에는 [폴더 정리]가 잠긴다
-  · `python gui.py --autostart` — 설정이 갖춰져 있으면 창이 뜬 직후 수집을 스스로 시작한다(무인 재시작)
+화면 골격(현장 수집기 화면과 같은 짜임):
+
+    ┌ 머리글(제목·버전·상태) ─────────────────────────────┐
+    │ 메뉴  │ 고른 절(항목)          │  수집 기록(로그)    │
+    │ 수집 상태                      │  — 세로 전체        │
+    │ 메일 계정                      │                     │
+    │ 저장 위치·주기                 │                     │
+    │ 데이터베이스                   │                     │
+    │ 선박 관리                      │                     │
+    │ 선석배정 상태                  │                     │
+    └───────────────────────────────────────────────────┘
+
+  · 좌측 메뉴로 절을 갈아 끼운다 — 항목이 많아 한 화면에 다 펴면 글자가 잘린다.
+  · 우측 「수집 기록」은 늘 보인다(수집 중에 무슨 일이 벌어지는지 눈을 떼지 않아도 된다).
+
+절마다 담은 것(0.7-01 까지의 기능 그대로, 자리만 옮겼다):
+
+  수집 상태     [수집 시작/중지] [연결 테스트] [저장] · 상태 문구 · 지금 수집 조건(한국어)
+  메일 계정     메일사 프리셋(후이즈/회사메일 · 네이버 · 한메일 · 지메일 · 직접입력)
+                — 고르면 방식(IMAP/POP3)·서버·포트·SSL 이 한꺼번에 채워진다.
+                직접입력일 때만 방식·서버·포트·SSL 을 손으로 고칠 수 있다. 이메일/비밀번호(*).
+  저장 위치·주기 메일박스 폴더 · 최근 며칠 · 주기(분)
+  데이터베이스   firebaseConfig 붙여넣기(앱에 넣은 것과 같은 값) · [연결 테스트]
+  선박 관리     발견된 선박 체크리스트 — 체크를 끄면 그 선박의 새 메일은 _기타 로 간다
+                · 정본표에 있는 배는 "코드 — 정식 선박명", 없는 배는 "(미확인)"
+                · 미확인 항목은 [정본으로 승인](0.8 신규) 으로 정본표에 바로 올리거나,
+                  [정본 연결…] 로 다른 정본 코드에 합치거나, [항목 삭제] 로 목록에서 뺀다
+                · [폴더 정리] [새로고침] [정본표 가져오기…]
+  선석배정 상태  마지막 조회 시각 · 터미널별 줄 수 · 실패 사유(읽기 표시만)
+
+  `python gui.py --autostart` — 설정이 갖춰져 있으면 창이 뜬 직후 수집을 스스로 시작한다(무인 재시작).
 """
 
+import json
 import os
 import queue
 import shutil
@@ -30,9 +47,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import berth_schedule as bsch     # 0.8 — 선석배정 상태(읽기 표시만, 판정에 쓰지 않는다)
 import mailpilot as core
 
 PAD = 6
+
+# 좌측 메뉴 — (키, 이름) 순서대로 세로로 놓인다. 첫 항목이 창을 열었을 때 보이는 절이다.
+SECTIONS = (
+    ("run", "수집 상태"),
+    ("mail", "메일 계정"),
+    ("store", "저장 위치 · 주기"),
+    ("db", "데이터베이스"),
+    ("vessel", "선박 관리"),
+    ("berth", "선석배정 상태"),
+)
 
 
 class MailPilotGUI:
@@ -43,7 +71,7 @@ class MailPilotGUI:
         self.cache_path = cache_path or core.CACHE_PATH
         self.master_path = master_path or core.MASTER_PATH     # 선박 정본표 파일 자리
         self.master = master or tk.Tk()
-        self.master.title("메일파일럿 Uni %s — 설정"
+        self.master.title("메일파일럿 Uni %s — 수집기"
                           % core.VERSION.split()[-1])
         self.collector = None
         self._autostarting = False       # --autostart 로 켜는 중이면 저장 확인창을 띄우지 않는다
@@ -54,6 +82,10 @@ class MailPilotGUI:
         self.vessel_master = core.load_master(self.master_path)
         self.tally_vars = {}
         self._vessel_rows = []
+        # 0.8 — 좌측 메뉴로 갈아 끼우는 절. 한 번만 만들어 두고 보이기/숨기기로만 바꾼다.
+        self.section_frames = {}
+        self.menu_buttons = {}
+        self.current_section = None
 
         cfg = core.load_config(self.config_path) or dict(core.DEFAULT_CONFIG)
         # 0.6 — 화면에 칸이 없는 설정(모항 별칭·선석배정·비관할 항로 …)을 기억해 뒀다가
@@ -78,6 +110,7 @@ class MailPilotGUI:
         self.var_poll = tk.StringVar(self.master, str(cfg.get("poll_minutes", 10)))
         self.var_status = tk.StringVar(self.master, "대기 중")
         self.var_condition = tk.StringVar(self.master, "")
+        self.var_berth = tk.StringVar(self.master, "")
 
         self._build(cfg)
         core.add_log_listener(self.log_queue.put)
@@ -85,122 +118,309 @@ class MailPilotGUI:
 
     # ────────────────────── 화면 구성 ──────────────────────
     def _build(self, cfg):
+        """좌우 2단 — 좌측은 메뉴+절, 우측은 수집 기록(세로 전체)."""
+        self._size_window()
+
         root = ttk.Frame(self.master, padding=PAD)
         root.pack(fill="both", expand=True)
+        # 현장 수집기와 같은 비율 — 좌 3 : 우 2. 창을 늘리면 양쪽이 함께 늘어난다.
+        root.grid_columnconfigure(0, weight=3)
+        root.grid_columnconfigure(1, weight=2)
+        root.grid_rowconfigure(1, weight=1)
 
-        box1 = ttk.LabelFrame(root, text="1. 메일 계정", padding=PAD)
-        box1.pack(fill="x", pady=PAD)
+        # ── 머리글 ──
+        header = ttk.Frame(root)
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, PAD))
+        ttk.Label(header, text="⚓ 메일파일럿 Uni %s" % core.VERSION.split()[-1],
+                  font=("Malgun Gothic", 13, "bold")).pack(side="left")
+        ttk.Label(header, textvariable=self.var_status,
+                  foreground="#1a5").pack(side="right")
+
+        # ── 좌: 메뉴 + 고른 절 ──
+        left = ttk.Frame(root)
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, PAD))
+        # 절이 남는 자리를 다 쓴다. minsize 를 두는 이유 — 절마다 요구 폭이 달라
+        #   메뉴를 누를 때마다 좌우 경계가 들썩이는 것을 막는다.
+        left.grid_columnconfigure(1, weight=1, minsize=520)
+        left.grid_rowconfigure(0, weight=1)
+
+        menu = ttk.Frame(left)
+        menu.grid(row=0, column=0, sticky="ns", padx=(0, PAD))
+        for idx, (key, label) in enumerate(SECTIONS):
+            btn = ttk.Button(menu, text=self._menu_label(label, False),
+                             command=lambda k=key: self.show_section(k))
+            # sticky="ew" 라 메뉴 칸 너비는 가장 긴 이름에 맞춰진다 — 한글이 잘리지 않는다
+            btn.grid(row=idx, column=0, sticky="ew", pady=1)
+            self.menu_buttons[key] = btn
+
+        self.frm_section = ttk.Frame(left)
+        self.frm_section.grid(row=0, column=1, sticky="nsew")
+        self.frm_section.grid_columnconfigure(0, weight=1)
+        self.frm_section.grid_rowconfigure(0, weight=1)
+
+        builders = {"run": self._section_run, "mail": self._section_mail,
+                    "store": self._section_store, "db": self._section_db,
+                    "vessel": self._section_vessel, "berth": self._section_berth}
+        for key, _label in SECTIONS:
+            frame = builders[key](self.frm_section, cfg)
+            frame.grid(row=0, column=0, sticky="nsew")
+            frame.grid_remove()                     # 고른 절만 다시 보인다
+            self.section_frames[key] = frame
+
+        # ── 우: 수집 기록(세로 전체) ──
+        box_log = ttk.LabelFrame(root, text="수집 기록", padding=PAD)
+        box_log.grid(row=1, column=1, sticky="nsew")
+        self.txt_log = tk.Text(box_log, height=12, width=52, wrap="word", state="disabled")
+        scroll = ttk.Scrollbar(box_log, command=self.txt_log.yview)
+        scroll.pack(fill="y", side="right")
+        self.txt_log.pack(fill="both", expand=True, side="left")
+        self.txt_log.configure(yscrollcommand=scroll.set)
+
+        self.show_section(SECTIONS[0][0])
+        self.on_provider_change()
+
+    def _size_window(self):
+        """창 크기·최소 크기 — 좌우 2단이 겹치지 않게 넉넉히 잡는다."""
+        for name, value in (("geometry", "1180x760"), ("minsize", (980, 620))):
+            fn = getattr(self.master, name, None)
+            if fn is None:
+                continue
+            try:
+                fn(*value) if isinstance(value, tuple) else fn(value)
+            except tk.TclError as exc:              # 창이 없는 환경(시험 대역) — 조용히 넘기지 않는다
+                core.log("창 크기(%s)를 잡지 못했습니다: %s" % (name, exc))
+
+    def _menu_label(self, name, active):
+        """고른 절의 메뉴 글자에는 표식을 붙인다(글자 폭은 그대로 둔다)."""
+        return ("▶ " if active else "   ") + name
+
+    def show_section(self, key):
+        """좌측 메뉴 — 고른 절만 보이게 갈아 끼운다."""
+        if key not in self.section_frames:
+            core.log("없는 화면을 부르려 했습니다: %s" % key)
+            return None
+        for name, frame in self.section_frames.items():
+            if name == key:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        for (name, label) in SECTIONS:
+            button = self.menu_buttons.get(name)
+            if button is not None:
+                button.configure(text=self._menu_label(label, name == key))
+        self.current_section = key
+        if key == "berth":
+            self._refresh_berth()                   # 열자마자 최신 상태를 보여 준다
+        return key
+
+    # ── 절 1) 수집 상태 ──
+    def _section_run(self, parent, _cfg):
+        frm = ttk.LabelFrame(parent, text="수집 상태", padding=PAD)
+        frm.grid_columnconfigure(0, weight=1)
+
+        bar = ttk.Frame(frm)
+        bar.grid(row=0, column=0, sticky="ew")
+        self.btn_run = ttk.Button(bar, text="수집 시작", command=self.on_toggle_run)
+        self.btn_run.pack(side="left")
+        ttk.Button(bar, text="연결 테스트", command=self.on_test).pack(side="left", padx=PAD)
+        ttk.Button(bar, text="저장", command=self.on_save).pack(side="left")
+
+        ttk.Label(frm, textvariable=self.var_status, foreground="#1a5").grid(
+            row=1, column=0, sticky="w", pady=(PAD, 0))
+
+        # 지금 무엇을 어떤 조건으로 가져오는지 늘 보이게(창을 열면 바로 읽힌다)
+        self.lbl_condition = ttk.Label(frm, textvariable=self.var_condition,
+                                       foreground="#1a5", justify="left", wraplength=440)
+        self.lbl_condition.grid(row=2, column=0, sticky="w", pady=(PAD, 0))
+        self._refresh_condition()
+        self._watch_condition_vars()
+
+        ttk.Label(frm, justify="left", foreground="#555", wraplength=440,
+                  text="· [수집 시작]을 누르면 설정을 저장하고 곧바로 첫 판을 돕니다.\n"
+                       "· 창을 닫으면 수집도 멈춥니다 — 계속 받으려면 창을 열어 두십시오.\n"
+                       "· 무인 재시작(run_mailpilot.bat)은 창이 뜨는 대로 스스로 시작합니다.").grid(
+            row=3, column=0, sticky="w", pady=(PAD, 0))
+        return frm
+
+    # ── 절 2) 메일 계정 ──
+    def _section_mail(self, parent, _cfg):
+        box1 = ttk.LabelFrame(parent, text="메일 계정", padding=PAD)
 
         ttk.Label(box1, text="메일사").grid(row=0, column=0, sticky="w")
         self.cmb_provider = ttk.Combobox(
             box1, textvariable=self.var_provider, state="readonly",
             values=[core.PRESETS[k]["label"] for k in core.PRESET_ORDER],
             width=16)
-        self.cmb_provider.grid(row=0, column=1, sticky="w", padx=PAD)
+        self.cmb_provider.grid(row=0, column=1, columnspan=2, sticky="w", padx=PAD)
         self.cmb_provider.bind("<<ComboboxSelected>>", self.on_provider_change)
 
-        ttk.Label(box1, text="방식").grid(row=0, column=2, sticky="e")
-        self.rb_imap = ttk.Radiobutton(box1, text="IMAP", variable=self.var_protocol,
+        ttk.Label(box1, text="방식").grid(row=1, column=0, sticky="w", pady=(PAD, 0))
+        # 한 칸에 모아 담는다 — 칸마다 따로 두면 옆 칸(서버·이메일) 폭에 끌려 멀리 벌어진다
+        proto = ttk.Frame(box1)
+        proto.grid(row=1, column=1, columnspan=4, sticky="w", padx=PAD, pady=(PAD, 0))
+        self.rb_imap = ttk.Radiobutton(proto, text="IMAP", variable=self.var_protocol,
                                        value="imap", command=self.on_protocol_change)
-        self.rb_imap.grid(row=0, column=3, sticky="w")
-        self.rb_pop3 = ttk.Radiobutton(box1, text="POP3", variable=self.var_protocol,
+        self.rb_imap.pack(side="left")
+        self.rb_pop3 = ttk.Radiobutton(proto, text="POP3", variable=self.var_protocol,
                                        value="pop3", command=self.on_protocol_change)
-        self.rb_pop3.grid(row=0, column=4, sticky="w")
-        self.chk_ssl = ttk.Checkbutton(box1, text="SSL", variable=self.var_ssl)
-        self.chk_ssl.grid(row=0, column=5, sticky="w", padx=PAD)
+        self.rb_pop3.pack(side="left", padx=PAD)
+        self.chk_ssl = ttk.Checkbutton(proto, text="SSL", variable=self.var_ssl)
+        self.chk_ssl.pack(side="left", padx=PAD)
 
-        ttk.Label(box1, text="메일 서버").grid(row=1, column=0, sticky="w", pady=PAD)
+        ttk.Label(box1, text="메일 서버").grid(row=2, column=0, sticky="w", pady=(PAD, 0))
         self.ent_host = ttk.Entry(box1, textvariable=self.var_host, width=26)
-        self.ent_host.grid(row=1, column=1, columnspan=2, sticky="w", padx=PAD)
-        ttk.Label(box1, text="포트").grid(row=1, column=3, sticky="e")
+        self.ent_host.grid(row=2, column=1, columnspan=2, sticky="w", padx=PAD, pady=(PAD, 0))
+        ttk.Label(box1, text="포트").grid(row=2, column=3, sticky="e", pady=(PAD, 0))
         self.ent_port = ttk.Entry(box1, textvariable=self.var_port, width=6)
-        self.ent_port.grid(row=1, column=4, sticky="w", padx=PAD)
+        self.ent_port.grid(row=2, column=4, sticky="w", padx=PAD, pady=(PAD, 0))
 
-        ttk.Label(box1, text="이메일").grid(row=2, column=0, sticky="w", pady=PAD)
+        ttk.Label(box1, text="이메일").grid(row=3, column=0, sticky="w", pady=(PAD, 0))
         ttk.Entry(box1, textvariable=self.var_email, width=30).grid(
-            row=2, column=1, columnspan=2, sticky="w", padx=PAD)
-        ttk.Label(box1, text="비밀번호").grid(row=2, column=3, sticky="e")
-        ttk.Entry(box1, textvariable=self.var_password, width=22, show="*").grid(
-            row=2, column=4, columnspan=2, sticky="w", padx=PAD)
+            row=3, column=1, columnspan=3, sticky="w", padx=PAD, pady=(PAD, 0))
 
-        self.lbl_help = ttk.Label(box1, text="", foreground="#555", justify="left")
-        self.lbl_help.grid(row=3, column=0, columnspan=6, sticky="w", pady=(PAD, 0))
+        ttk.Label(box1, text="비밀번호").grid(row=4, column=0, sticky="w", pady=(PAD, 0))
+        ttk.Entry(box1, textvariable=self.var_password, width=30, show="*").grid(
+            row=4, column=1, columnspan=3, sticky="w", padx=PAD, pady=(PAD, 0))
 
-        box2 = ttk.LabelFrame(root, text="2. 저장 위치 · 주기", padding=PAD)
-        box2.pack(fill="x", pady=PAD)
+        self.lbl_help = ttk.Label(box1, text="", foreground="#555", justify="left",
+                                  wraplength=500)
+        self.lbl_help.grid(row=5, column=0, columnspan=5, sticky="w", pady=(PAD, 0))
+        return box1
+
+    # ── 절 3) 저장 위치 · 주기 ──
+    def _section_store(self, parent, _cfg):
+        box2 = ttk.LabelFrame(parent, text="저장 위치 · 주기", padding=PAD)
+        box2.grid_columnconfigure(1, weight=1)
+
         ttk.Label(box2, text="메일박스 폴더").grid(row=0, column=0, sticky="w")
-        ttk.Entry(box2, textvariable=self.var_root, width=48).grid(row=0, column=1, padx=PAD)
+        ttk.Entry(box2, textvariable=self.var_root, width=34).grid(
+            row=0, column=1, sticky="ew", padx=PAD)
         ttk.Button(box2, text="찾기…", command=self.on_pick_folder).grid(row=0, column=2)
-        ttk.Label(box2, text="최근 며칠").grid(row=0, column=3, sticky="e", padx=(PAD, 0))
-        ttk.Entry(box2, textvariable=self.var_days, width=5).grid(row=0, column=4)
-        ttk.Label(box2, text="주기(분)").grid(row=0, column=5, sticky="e", padx=(PAD, 0))
-        ttk.Entry(box2, textvariable=self.var_poll, width=5).grid(row=0, column=6)
 
-        # 지금 무엇을 어떤 조건으로 가져오는지 늘 보이게(설정 창을 열면 바로 읽힌다)
-        self.lbl_condition = ttk.Label(box2, textvariable=self.var_condition,
-                                       foreground="#1a5", justify="left", wraplength=640)
-        self.lbl_condition.grid(row=1, column=0, columnspan=7, sticky="w", pady=(PAD, 0))
-        self._refresh_condition()
-        self._watch_condition_vars()
+        row = ttk.Frame(box2)
+        row.grid(row=1, column=0, columnspan=3, sticky="w", pady=(PAD, 0))
+        ttk.Label(row, text="최근 며칠").pack(side="left")
+        ttk.Entry(row, textvariable=self.var_days, width=5).pack(side="left", padx=(PAD, 0))
+        ttk.Label(row, text="주기(분)").pack(side="left", padx=(PAD * 2, 0))
+        ttk.Entry(row, textvariable=self.var_poll, width=5).pack(side="left", padx=(PAD, 0))
 
-        box3 = ttk.LabelFrame(root, text="3. firebaseConfig (앱에 넣은 것과 같은 값을 붙여넣기)",
-                              padding=PAD)
-        box3.pack(fill="both", pady=PAD)
-        self.txt_fb = tk.Text(box3, height=8, width=88)
-        self.txt_fb.pack(fill="both", expand=True)
+        ttk.Label(box2, justify="left", foreground="#555", wraplength=440,
+                  text="· 메일박스 폴더 아래에 {선박코드}/{항차}/ 로 첨부가 쌓입니다.\n"
+                       "· 판독 못 한 메일은 _미분류 에, 체크를 끈 선박은 _기타 에 둡니다.").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(PAD, 0))
+        return box2
+
+    # ── 절 4) 데이터베이스 ──
+    def _section_db(self, parent, cfg):
+        box3 = ttk.LabelFrame(parent, text="데이터베이스 (firebaseConfig)", padding=PAD)
+        box3.grid_columnconfigure(0, weight=1)
+        box3.grid_rowconfigure(1, weight=1)
+
+        ttk.Label(box3, justify="left", foreground="#555", wraplength=440,
+                  text="검수앱에 넣은 firebaseConfig 를 그대로 붙여넣으십시오. "
+                       "이 값이 있어야 선박·항차가 앱 화면에 뜹니다.").grid(
+            row=0, column=0, sticky="w")
+        self.txt_fb = tk.Text(box3, height=12, width=52)
+        self.txt_fb.grid(row=1, column=0, sticky="nsew", pady=(PAD, 0))
         existing = cfg.get("firebase") or {}
         if existing:
-            import json as _json
-            self.txt_fb.insert("1.0", _json.dumps(existing, ensure_ascii=False, indent=2))
+            self.txt_fb.insert("1.0", json.dumps(existing, ensure_ascii=False, indent=2))
+        ttk.Button(box3, text="연결 테스트", command=self.on_test).grid(
+            row=2, column=0, sticky="w", pady=(PAD, 0))
+        return box3
 
-        box_v = ttk.LabelFrame(root, text="4. 발견된 선박 (검수 대상 체크)", padding=PAD)
-        box_v.pack(fill="both", pady=PAD)
+    # ── 절 5) 선박 관리 ──
+    def _section_vessel(self, parent, _cfg):
+        box_v = ttk.LabelFrame(parent, text="선박 관리 (검수 대상 체크)", padding=PAD)
+        box_v.grid_columnconfigure(0, weight=1)
+        box_v.grid_rowconfigure(2, weight=1)
+
+        ttk.Label(box_v, foreground="#555", justify="left", wraplength=440,
+                  text="체크를 끄면 그 선박의 새 메일은 _기타 폴더로 들어갑니다(발견 기록은 남습니다).\n"
+                       "정본표에 없는 배는 (미확인) 으로 보입니다 — [정본으로 승인] 으로 정본표에 "
+                       "올리거나, [정본 연결…] 로 다른 코드에 합치거나, [항목 삭제] 로 뺍니다.").grid(
+            row=0, column=0, sticky="w")
 
         head = ttk.Frame(box_v)
-        head.pack(fill="x")
-        ttk.Label(head, text="체크를 끄면 그 선박의 새 메일은 _기타 폴더로 들어갑니다. "
-                             "발견 자체는 계속 기록됩니다.\n"
-                             "정본표에 없는 배는 (미확인) 으로 보입니다 — [정본 연결…] 로 합치거나 "
-                             "[항목 삭제] 로 목록에서 뺍니다.",
-                  foreground="#555", justify="left").pack(side="left")
-        ttk.Button(head, text="새로고침", command=self.on_refresh_vessels).pack(side="right")
-        ttk.Button(head, text="정본표 가져오기…", command=self.on_import_master).pack(
-            side="right", padx=PAD)
+        head.grid(row=1, column=0, sticky="ew", pady=(PAD, 0))
+        ttk.Button(head, text="새로고침", command=self.on_refresh_vessels).pack(side="left")
         # 수집 중에는 잠근다 — 옮기는 도중에 새 첨부가 떨어지면 반쪽만 정리된다
         self.btn_organize = ttk.Button(head, text="폴더 정리", command=self.on_organize)
-        self.btn_organize.pack(side="right", padx=PAD)
+        self.btn_organize.pack(side="left", padx=PAD)
+        ttk.Button(head, text="정본표 가져오기…", command=self.on_import_master).pack(side="left")
 
         body = ttk.Frame(box_v)
-        body.pack(fill="both", expand=True)
-        self.cvs_vessels = tk.Canvas(body, height=160, highlightthickness=0)
+        body.grid(row=2, column=0, sticky="nsew", pady=(PAD, 0))
+        self.cvs_vessels = tk.Canvas(body, height=260, highlightthickness=0)
         scroll_v = ttk.Scrollbar(body, orient="vertical", command=self.cvs_vessels.yview)
         self.frm_vessels = ttk.Frame(self.cvs_vessels)
+        self.frm_vessels.grid_columnconfigure(0, weight=1)
         self.frm_vessels.bind(
             "<Configure>",
             lambda _e: self.cvs_vessels.configure(scrollregion=self.cvs_vessels.bbox("all")))
-        self.cvs_vessels.create_window((0, 0), window=self.frm_vessels, anchor="nw")
+        self._vessels_window = self.cvs_vessels.create_window(
+            (0, 0), window=self.frm_vessels, anchor="nw")
+        # 목록 폭을 캔버스에 맞춘다 — 행이 남는 자리를 다 쓰게(가로로 잘리지 않게)
+        self.cvs_vessels.bind(
+            "<Configure>",
+            lambda e: self.cvs_vessels.itemconfigure(self._vessels_window, width=e.width))
         self.cvs_vessels.configure(yscrollcommand=scroll_v.set)
         self.cvs_vessels.pack(side="left", fill="both", expand=True)
         scroll_v.pack(side="right", fill="y")
+        self._bind_wheel(self.cvs_vessels)
         self._render_vessels()
+        return box_v
 
-        bar = ttk.Frame(root)
-        bar.pack(fill="x", pady=PAD)
-        ttk.Button(bar, text="연결 테스트", command=self.on_test).pack(side="left")
-        ttk.Button(bar, text="저장", command=self.on_save).pack(side="left", padx=PAD)
-        self.btn_run = ttk.Button(bar, text="수집 시작", command=self.on_toggle_run)
-        self.btn_run.pack(side="left")
-        ttk.Label(bar, textvariable=self.var_status).pack(side="right")
+    def _bind_wheel(self, canvas):
+        """목록 위에 마우스를 올렸을 때만 휠로 굴린다(로그 쪽 휠을 뺏지 않게)."""
+        def on_wheel(event):
+            try:
+                canvas.yview_scroll(int(-(event.delta or 0) / 120), "units")
+            except tk.TclError as exc:
+                core.log("선박 목록을 굴리지 못했습니다: %s" % exc)
 
-        box4 = ttk.LabelFrame(root, text="최근 로그", padding=PAD)
-        box4.pack(fill="both", expand=True)
-        self.txt_log = tk.Text(box4, height=12, width=88, state="disabled")
-        self.txt_log.pack(fill="both", expand=True, side="left")
-        scroll = ttk.Scrollbar(box4, command=self.txt_log.yview)
-        scroll.pack(fill="y", side="right")
-        self.txt_log.configure(yscrollcommand=scroll.set)
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", on_wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
-        self.on_provider_change()
+    # ── 절 6) 선석배정 상태 ──
+    def _section_berth(self, parent, _cfg):
+        box_b = ttk.LabelFrame(parent, text="선석배정 상태 (읽기 표시)", padding=PAD)
+        box_b.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(box_b, foreground="#555", justify="left", wraplength=440,
+                  text="사이클마다 터미널 두 곳(PNCT·PCTC)의 선석배정표를 한 번씩 읽습니다. "
+                       "여기서는 마지막 결과만 보여 줍니다 — 값을 고치는 곳이 아닙니다.").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(box_b, textvariable=self.var_berth, justify="left",
+                  wraplength=440).grid(row=1, column=0, sticky="w", pady=(PAD, 0))
+        ttk.Button(box_b, text="새로고침", command=self._refresh_berth).grid(
+            row=2, column=0, sticky="w", pady=(PAD, 0))
+        self._refresh_berth()
+        return box_b
+
+    def berth_status_text(self):
+        """마지막 선석배정 조회 결과를 한국어 몇 줄로(값을 지어내지 않는다)."""
+        status = bsch.last_fetch_status()
+        if not status.get("at"):
+            return ("아직 선석배정표를 읽은 적이 없습니다 — 수집을 한 판 돌리면 "
+                    "여기에 채워집니다.")
+        rows = status.get("rows") or {}
+        counts = " · ".join("%s %d줄" % (name, rows[name]) for name in sorted(rows)) or "없음"
+        lines = ["마지막 조회: %s" % status["at"], "터미널별 줄 수: %s" % counts]
+        if status.get("why"):
+            lines.append("실패 사유: %s" % status["why"])
+            lines.append("마지막 성공: %s" % (status.get("ok_at") or "아직 없음"))
+            lines.append("※ 한쪽이라도 못 받으면 그 판의 선석배정 판정은 통째로 건너뜁니다.")
+        else:
+            lines.append("상태: 두 터미널 모두 받았습니다.")
+        return "\n".join(lines)
+
+    def _refresh_berth(self):
+        """표시 문구를 새로 만든다 — 달라졌을 때만 화면 변수를 건드린다."""
+        text = self.berth_status_text()
+        if text != self.var_berth.get():
+            self.var_berth.set(text)
+        return text
 
     # ────────────────────── 동작 ──────────────────────
     def current_provider(self):
@@ -268,12 +488,16 @@ class MailPilotGUI:
                 core.log("수집 조건 자동 갱신을 걸지 못했습니다(%s) — 저장 시 갱신됩니다." % exc)
 
     # ────────────────────── 발견된 선박 체크리스트 ──────────────────────
+    def vessel_display_name(self, code):
+        """읽어낸 이름(정본에 없을 때 승인·표시에 쓴다)."""
+        return (self.cache.get("codes") or {}).get(code) or code
+
     def vessel_row_label(self, code):
         """행 문구 — 정본에 있으면 '코드 — 정식 선박명', 없으면 '코드 — 읽어낸 이름 (미확인)'."""
         item = core.master_by_code(self.vessel_master, code)
         if item:
             return "%s — %s" % (code, item["name"])
-        return "%s — %s (미확인)" % (code, (self.cache.get("codes") or {}).get(code, code))
+        return "%s — %s (미확인)" % (code, self.vessel_display_name(code))
 
     def _render_vessels(self):
         """캐시의 codes 를 코드순으로 체크박스 목록으로 그린다(미확인 행에는 손질 단추를 붙인다)."""
@@ -293,22 +517,27 @@ class MailPilotGUI:
             self._vessel_rows.append(empty)
             return
         for row, code in enumerate(sorted(codes)):
+            # 0.8 — 한 척 = 한 묶음(체크 줄 + 미확인이면 그 아래 단추 줄).
+            #   좌측이 좁아져 단추를 옆으로 늘어놓으면 끝 단추가 잘린다.
+            holder = ttk.Frame(self.frm_vessels)
+            holder.grid(row=row, column=0, sticky="ew")
+            self._vessel_rows.append(holder)
             var = tk.BooleanVar(self.master, core.tally_enabled(self.cache, code))
             self.tally_vars[code] = var
-            chk = ttk.Checkbutton(self.frm_vessels, text=self.vessel_row_label(code),
-                                  variable=var,
+            chk = ttk.Checkbutton(holder, text=self.vessel_row_label(code), variable=var,
                                   command=lambda c=code: self.on_toggle_tally(c))
-            chk.grid(row=row, column=0, sticky="w")
-            self._vessel_rows.append(chk)
+            chk.pack(anchor="w")
             if core.master_by_code(self.vessel_master, code) is not None:
                 continue                              # 정본에 있는 배는 손질 단추가 필요 없다
-            btn_link = ttk.Button(self.frm_vessels, text="정본 연결…",
-                                  command=lambda c=code: self.on_link_master(c))
-            btn_link.grid(row=row, column=1, sticky="w", padx=(PAD, 0))
-            btn_del = ttk.Button(self.frm_vessels, text="항목 삭제",
-                                 command=lambda c=code: self.on_delete_vessel(c))
-            btn_del.grid(row=row, column=2, sticky="w", padx=(PAD, 0))
-            self._vessel_rows.extend([btn_link, btn_del])
+            buttons = ttk.Frame(holder)
+            buttons.pack(anchor="w", padx=(20, 0), pady=(0, PAD))
+            # 0.8 — 미확인 항목을 그 자리에서 정본으로 올린다(문서 승인을 매번 기다리지 않게)
+            ttk.Button(buttons, text="정본으로 승인",
+                       command=lambda c=code: self.on_approve_master(c)).pack(side="left")
+            ttk.Button(buttons, text="정본 연결…",
+                       command=lambda c=code: self.on_link_master(c)).pack(side="left", padx=PAD)
+            ttk.Button(buttons, text="항목 삭제",
+                       command=lambda c=code: self.on_delete_vessel(c)).pack(side="left")
 
     def on_refresh_vessels(self):
         """캐시·정본표를 다시 읽어 목록을 새로 그린다(수집 중 새로 발견·이관된 선박 반영)."""
@@ -373,6 +602,90 @@ class MailPilotGUI:
         """정본 연결 콤보에 쓸 '코드 — 정식 선박명' 목록(코드순)."""
         return ["%s — %s" % (item["code"], item["name"])
                 for item in sorted(self.vessel_master, key=lambda x: x["code"])]
+
+    # ── 0.8 신규: 미확인 항목을 정본으로 승인 ──
+    def approve_message(self, code, name):
+        """승인 확인창 문구 — 무엇이 어디에 적히는지 먼저 보여 준다."""
+        return ("%s — %s 를 선박 정본표에 올립니다.\n\n"
+                "· 앞으로 이 코드로 오는 메일은 (미확인)이 아니라 정식 선박으로 잡힙니다.\n"
+                "· 적히는 곳: %s\n"
+                "· 메일박스 폴더와 파일은 건드리지 않습니다.\n"
+                "· 이름이 틀렸으면 승인하지 말고 [정본 연결…] 을 쓰십시오.\n\n"
+                "진행할까요?" % (code, name, self.master_path))
+
+    def on_approve_master(self, code):
+        """미확인 항목 하나를 정본표에 추가한다(확인창 한 번 · 중복이면 알리고 끝)."""
+        if core.master_by_code(self.vessel_master, code) is not None:
+            messagebox.showinfo("정본으로 승인", "%s 는 이미 정본표에 있습니다." % code)
+            return None
+        name = self.vessel_display_name(code)
+        if not messagebox.askyesno("정본으로 승인", self.approve_message(code, name)):
+            return None
+        return self.approve_master_now(code, name)
+
+    def approve_master_now(self, code, name=None):
+        """확인창 없이 정본표에 한 척을 추가한다 — 중복이면 아무것도 하지 않는다."""
+        code = (code or "").strip().upper()
+        if not code:
+            core.log("정본 승인 실패 — 코드가 비어 있습니다.")
+            return None
+        if core.master_by_code(self.vessel_master, code) is not None:
+            core.log("정본 승인 건너뜀 — 이미 정본표에 있습니다: %s" % code)
+            return None
+        name = " ".join(str(name or self.vessel_display_name(code)).upper().split()) or code
+        items = self._read_master_file()
+        if items is None:
+            return None                              # 읽지 못했으면 덮어쓰지 않는다
+        if any(isinstance(item, dict)
+               and str(item.get("code") or "").strip().upper() == code for item in items):
+            core.log("정본 승인 건너뜀 — 정본표 파일에 이미 있습니다: %s" % code)
+            self.vessel_master = core.load_master(self.master_path)
+            self._render_vessels()
+            return None
+        items.append({"code": code, "name": name, "aliases": [], "ko": []})
+        if not self._write_master_file(items):
+            return None
+        self.vessel_master = core.load_master(self.master_path)
+        # 수집 중이면 돌고 있는 수집기도 새 정본표를 보게 한다(재시작을 기다리지 않게)
+        if self.collector is not None:
+            self.collector.master = self.vessel_master
+        self._render_vessels()
+        note = ("정본 승인 — %s(%s) 를 정본표에 올렸습니다 · 정본 %d척"
+                % (code, name, len(self.vessel_master)))
+        core.log(note)
+        self.var_status.set(note)
+        return {"code": code, "name": name, "count": len(self.vessel_master)}
+
+    def _read_master_file(self):
+        """정본표 파일을 원문 그대로 읽는다(별칭·한글 별칭을 잃지 않게). 못 읽으면 None."""
+        if not os.path.exists(self.master_path):
+            return []
+        try:
+            with open(self.master_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            core.log("정본표를 읽지 못해 승인을 멈춥니다(%s): %s" % (self.master_path, exc))
+            messagebox.showerror("정본으로 승인", "정본표를 읽지 못했습니다: %s" % exc)
+            return None
+        if not isinstance(data, list):
+            core.log("정본표 형식이 목록이 아니어서 승인을 멈춥니다: %s" % self.master_path)
+            messagebox.showerror("정본으로 승인",
+                                 "정본표 형식이 목록이 아닙니다: %s" % self.master_path)
+            return None
+        return data
+
+    def _write_master_file(self, items):
+        """임시 파일에 먼저 쓰고 갈아 끼운다 — 쓰다 멈춰도 정본표가 반쪽이 되지 않는다."""
+        tmp_path = self.master_path + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(items, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.master_path)
+        except OSError as exc:
+            core.log("정본표를 저장하지 못했습니다: %s" % exc)
+            messagebox.showerror("정본으로 승인", "정본표를 저장하지 못했습니다: %s" % exc)
+            return False
+        return True
 
     def on_link_master(self, code):
         """미확인 항목 하나를 어느 정본에 합칠지 고르는 작은 창."""
@@ -673,12 +986,17 @@ class MailPilotGUI:
                 line = self.log_queue.get_nowait()
                 self.txt_log.configure(state="normal")
                 self.txt_log.insert("end", line + "\n")
-                self.txt_log.see("end")
+                self.txt_log.see("end")               # 자동 따라가기 — 늘 마지막 줄을 보여 준다
                 self.txt_log.configure(state="disabled")
         except queue.Empty:
             pass
         except Exception:
             pass
+        try:
+            if self.current_section == "berth":       # 보고 있을 때만 다시 만든다
+                self._refresh_berth()
+        except Exception as exc:
+            core.log("선석배정 상태를 새로 읽지 못했습니다: %s" % exc)
         try:
             self.master.after(500, self._pump_logs)
         except Exception:
