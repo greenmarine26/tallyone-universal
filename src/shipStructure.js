@@ -18,6 +18,8 @@ import { lookupBayDictV5SupplementEnhanced } from './data/shipBayDict_v5_supplem
 import { getMatrixV5 } from './data/shipBayDict_v5_matrix.js';
 // M6.57: 베이사전 자동 보정 — verified 보존, 비어있는 필드만 다단계 fallback으로 채움
 import { enrichBayDef } from './bayDictAutoEnrich.js';
+// TallyUni 0.7-02: 정본 판정 단일 소스 — 조회 경로(source)가 아니라 항목 안쪽(_userOwned)을 본다.
+import { isUserOwnedBayDict } from './utils.js';
 
 // M4.5: 선박 식별자 정규화 (퍼지 매칭용)
 //   "TJ TEN JUPITER" → "TJTENJUPITER"
@@ -525,8 +527,12 @@ export function getShipBayDictData(imo, code, opts) {
   //   M6.93.12 fix #3 (검수앱지침서 §6.2): user source는 v2 union 절대 금지.
   //         사용자가 매트릭스 빌더에서 직접 입력한 정답을 v2 사전이 덮어쓰는 것 방지.
   //         사용자가 명시적으로 제거한 tier도 v2 union으로 복원되는 사고 차단.
+  //   TallyUni 0.7-02: 게이트를 조회 경로가 아니라 **항목 안쪽**으로 판정한다.
+  //         source==='firebase' 만 보면, 로컬 사본이 없는 브라우저(다른 기기·시크릿창)에서
+  //         검수사 정본이 v2 자동본과 union 되어 검수사가 비운 홀드가 되살아났다.
   let finalBayDef = { ...bayDef, bayList: bayList || [] };
-  if (result.source === 'firebase') {
+  const _isUserOwned = isUserOwnedBayDict({ source: result.source, bayDef });
+  if (result.source === 'firebase' && !_isUserOwned) {
     try {
       const v2Backup = lookupBayDictV2Enhanced(imo, code);
       const v2HasData = v2Backup?.entry?.bayDef?.baysSummary && v2Backup.entry.bayDef.baysSummary.length > 0;
@@ -547,11 +553,14 @@ export function getShipBayDictData(imo, code, opts) {
   //   원본 entry 미수정 (deep clone 후 보강).
   //   M6.93.12 fix #4: source='user'일 때 enrichBayDef가 EDI 자동 채움 차단.
   const matrixV5 = getMatrixV5(data.code);
-  const wrappedEntry = enrichBayDef({ bayDef: finalBayDef }, matrixV5, null, result.source);
+  //   TallyUni 0.7-02: 조회 경로가 아니라 정본 판정 결과를 넘긴다(EDI 자동 보강·tier union 차단).
+  const wrappedEntry = enrichBayDef({ bayDef: finalBayDef }, matrixV5, null, _isUserOwned ? 'user' : result.source);
   const enrichedBayDef = wrappedEntry.bayDef;
 
   return {
     source: result.source,
+    // TallyUni 0.7-02: 정규화된 정본 표식 — 하류(카고플랜·베이상세·플랜편집)가 이걸 본다.
+    _userOwned: _isUserOwned,
     matchedBy: result.matchedBy || result.source,
     // V7.26: 계열 대체(series-substitute)면 베이 구조만 빌리고 신원(이름/콜사인)은 안 빌림.
     //   (이전: DJCT가 베이사전 없어 'DJ' 계열의 XIN TAI PING 구조를 빌렸는데, 그 콜사인 BSDU까지

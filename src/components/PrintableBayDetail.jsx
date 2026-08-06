@@ -17,7 +17,7 @@
 import React, { useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
-import { normalizeBay, isoToPdfLabel, getContainerColorKey, buildContainerColorMap, isPyeongtaekPort } from '../utils.js';
+import { normalizeBay, isoToPdfLabel, getContainerColorKey, buildContainerColorMap, isPyeongtaekPort, isUserOwnedBayDict } from '../utils.js';
 import { getShipBayDictData } from '../shipStructure.js';
 import { buildEmptyBayRenderData } from '../cargoPlanCore.js';
 import { BayBoxV2, CARGO_V2_CSS } from './PrintableCargoPlanV2.jsx';
@@ -576,15 +576,18 @@ export default function PrintableBayDetail({
     const baseDict = getShipBayDictData(shipImo, shipName, { ediBayCount });
     if (!baseDict) return null;
     // M6.94.0 사용자 원칙: source='user'면 enrichBayDef 보강 차단 (사용자 데이터 그대로)
+    //   TallyUni 0.7-02: 판정은 조회 경로가 아니라 항목 안쪽으로.
+    const _isUser = isUserOwnedBayDict(baseDict);
     const enrichedEntry = enrichBayDef(
       { bayDef: baseDict.bayDef },
       baseDict._v5Matrix,
       containers,
-      baseDict.source
+      _isUser ? 'user' : baseDict.source
     );
     return {
       ...baseDict,
-      bayDef: { ...enrichedEntry.bayDef, source: baseDict.source, _userOwned: baseDict.source === 'user' },
+      bayDef: { ...enrichedEntry.bayDef, source: baseDict.source, _userOwned: _isUser },
+      _userOwned: _isUser,
       _enrichMeta: enrichedEntry._enrichMeta || baseDict._enrichMeta,
     };
   }, [shipImo, shipName, containers]);

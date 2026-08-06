@@ -1914,7 +1914,13 @@ export async function fbSaveShipBayDict(code, entry) {
       const exTs = Number(existing.updatedAt || existing.bayDef?.parsedAt || 0);
       const enTs = Number(entry.updatedAt || entry.bayDef?.parsedAt || Date.now());
       if (exTs > enTs) {
-        return true; // 기존이 더 최신 → 보존
+        // TallyUni 0.7-02: 조용히 실패하지 않는다.
+        //   이전엔 저장을 건너뛰면서 true(성공)를 돌려줘 빌더 화면에 "☁ 동기화됨"이 떴다.
+        //   검수사가 "저장했는데 적용이 안 된다"고 느끼는 정체 중 하나였다.
+        console.warn('[fbSaveShipBayDict] 서버 항목이 더 최신이라 저장을 건너뜀 —', cleanCode,
+          '서버', new Date(exTs).toISOString(), '> 이번 저장', new Date(enTs).toISOString(),
+          '· 기기 시계 차이를 의심할 것');
+        return false;
       }
     }
     // ──────────────────────────────────────────────────────────────────────

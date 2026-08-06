@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.7-01';   // 메일함 파일 목록 — 방향 폴더 `2606N(D)`와 무표시 `2606N`을 합쳐 읽는다(수집기가 방향을 못 가린 PDF 실종 수리)
+export const APP_VERSION = 'TallyUni 0.7-02';   // 카고플랜 정본 판정 — 조회 경로(source)가 아니라 항목 안쪽(_userOwned)을 본다(isUserOwnedBayDict 단일 소스) + fbSaveShipBayDict 조용한 실패 제거
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가
@@ -3144,6 +3144,25 @@ export function isOppositeDirRecord(r, mode) {
 /** 반대 방향 레코드를 걸러낸 컨번호 목록 — 카운트 모수·컨테이너 병합이 함께 쓴다. */
 export function ownDirCns(records, mode) {
   return Object.keys(records || {}).filter(cn => !isOppositeDirRecord(records[cn], mode));
+}
+
+/**
+ * 이 베이사전이 **검수사가 직접 만든 정본인가** — 단일 소스. (TallyUni 0.7-02)
+ *
+ * 왜 필요한가 — 조회 결과의 `source`는 *어느 경로로 찾았나*(user=로컬 / firebase / v2 …)이지
+ *   *누가 만들었나*가 아니다. 그런데 여러 곳이 `source === 'user'` 로 "정본인가"를 판정했다.
+ *   그래서 **같은 매트릭스인데 브라우저마다 다른 그림**이 나왔다(정본 앱 NSFR 2026-08-06 실측).
+ *   로컬 사본이 있는 브라우저는 source='user', 없는 브라우저는 같은 매트릭스를 source='firebase'로 받는다.
+ *   판정은 항상 **항목 안쪽**을 봐야 한다. 겉껍데기(조회 경로)를 보면 안 된다.
+ *   `source`(조회 경로)는 화면 표시용으로만 쓴다.
+ *
+ * @param d 조회 결과(dictData) 또는 entry 또는 bayDef — 어느 것을 줘도 된다.
+ */
+export function isUserOwnedBayDict(d) {
+  if (!d) return false;
+  const bd = d.bayDef || d;
+  return d.source === 'user' || d._userOwned === true ||
+         bd?.source === 'user' || bd?._userOwned === true;
 }
 
 // 컨번호 형식 검사 단일 소스 (ISO 6346: 알파벳 4 + 숫자 7)

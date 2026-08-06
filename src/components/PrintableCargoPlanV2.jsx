@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom';
 import { getShipBayDictData } from '../shipStructure.js';
 import { extractShipMetaFromVoyage } from '../shipMatrixBuilder.js';
 import { enrichBayDef } from '../bayDictAutoEnrich.js';
-import { isReeferContainer, isoToLabel, getContainerColorKey, buildContainerColorMap, isPyeongtaekPort } from '../utils.js';
+import { isReeferContainer, isoToLabel, getContainerColorKey, buildContainerColorMap, isPyeongtaekPort, isUserOwnedBayDict } from '../utils.js';
 import { getBayOverride } from '../data/shipBayDict_pdf_override.js';
 import {
   autoPairBays,
@@ -488,10 +488,13 @@ export default function PrintableCargoPlanV2({
     if (!baseDict) return null;
     // M6.94.0 사용자 원칙 1: source='user'면 enrichBayDef가 즉시 entry 반환 (어떤 보강도 안 함).
     //   AI 임시 베이사전 (v2/v5/firebase 등)일 때만 EDI 자동 채움 등 보강 동작.
-    const enrichedEntry = enrichBayDef({ bayDef: baseDict.bayDef }, baseDict._v5Matrix, structCont, baseDict.source);
+    //   TallyUni 0.7-02: 판정은 조회 경로가 아니라 항목 안쪽으로.
+    const _isUser = isUserOwnedBayDict(baseDict);
+    const enrichedEntry = enrichBayDef({ bayDef: baseDict.bayDef }, baseDict._v5Matrix, structCont, _isUser ? 'user' : baseDict.source);
     // M6.94.0: cargoPlanCore가 user source 판단할 수 있게 bayDef에 source 정보 포함
-    const bayDefWithSource = { ...enrichedEntry.bayDef, source: baseDict.source, _userOwned: baseDict.source === 'user' };
-    return { ...baseDict, bayDef: bayDefWithSource };
+    //   TallyUni 0.7-02: _userOwned 를 조회 경로로 덮어쓰지 않는다(하류 오염 지점이었다).
+    const bayDefWithSource = { ...enrichedEntry.bayDef, source: baseDict.source, _userOwned: _isUser };
+    return { ...baseDict, bayDef: bayDefWithSource, _userOwned: _isUser };
   }, [shipImo, shipName, structCont, voyageInfo]);
 
   const matrixBays = useMemo(() => {
@@ -537,7 +540,7 @@ export default function PrintableCargoPlanV2({
     //   홀수 베이 3·7·11·15…가 전부 날아가 카고플랜 페어가 통째로 붕괴한다.
     //   → user 사전이면 종전대로 v2가 정답, 자동 사전이면 v5에만 있는 베이도 살린다.
     if (raw.length > 0 && baysSummary.length > 0) {
-      if (dictData?.source === 'user') {
+      if (isUserOwnedBayDict(dictData)) {   // TallyUni 0.7-02: 조회 경로 아님 — 항목 안쪽
         const allowed = new Set(baysSummary.map((s) => Number(s.bayNo)).filter(Number.isFinite));
         bays = raw.filter((b) => allowed.has(Number(b.bayNum)));
       } else {
@@ -868,9 +871,10 @@ export default function PrintableCargoPlanV2({
           {urgentCount > 0 && <div className="col" style={{ fontSize: 9, color: '#dc2626', fontWeight: 'bold' }}>긴급 {urgentCount}</div>}
           {luggCount > 0 && <div className="col" style={{ fontSize: 9, color: '#7c3aed', fontWeight: 'bold' }}>수화물 {luggCount}</div>}
           {/* V9.05: 어느 베이사전으로 그렸는지 표기 — 오매칭 즉시 식별 (2026-07-21 SWAT 사건 후속) */}
-          <div className="col" style={{ fontSize: 8, color: (dictData && dictData.source === 'user') ? '#555' : '#dc2626', fontWeight: (dictData && dictData.source === 'user') ? 'normal' : 'bold' }}>
+          {/* TallyUni 0.7-02: 배지는 항목 안쪽으로 판정. source(조회 경로)는 화면에 그대로 남긴다 — 어디서 왔는지는 알아야 한다. */}
+          <div className="col" style={{ fontSize: 8, color: isUserOwnedBayDict(dictData) ? '#555' : '#dc2626', fontWeight: isUserOwnedBayDict(dictData) ? 'normal' : 'bold' }}>
             {dictData
-              ? `사전:${dictData.code || '?'}·${dictData.source || '?'}${dictData.bayDef?.parsedAt ? '·' + String(dictData.bayDef.parsedAt).slice(0, 10) : ''}${dictData.source !== 'user' ? ' ⚠비정본' : ''}`
+              ? `사전:${dictData.code || '?'}·${dictData.source || '?'}${dictData.bayDef?.parsedAt ? '·' + String(dictData.bayDef.parsedAt).slice(0, 10) : ''}${isUserOwnedBayDict(dictData) ? '' : ' ⚠비정본'}`
               : '사전:⚠미매칭(폴백 구조)'}
           </div>
           <div className="col">DATE : {today}</div>

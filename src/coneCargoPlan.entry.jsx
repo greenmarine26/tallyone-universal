@@ -4,7 +4,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import PrintableCargoPlanV2 from './components/PrintableCargoPlanV2.jsx';
-import { parseBAPLIE, parseAscFile, normalizeBay, isoToLabel } from './utils.js';   // V9.05-03: 콘앱 파서 통합용 + ConeOne 1.2: 격자 파생용
+import { parseBAPLIE, parseAscFile, normalizeBay, isoToLabel, isUserOwnedBayDict } from './utils.js';   // V9.05-03: 콘앱 파서 통합용 + ConeOne 1.2: 격자 파생용 + TallyUni 0.7-02: 정본 판정
 // ConeOne 1.2: 베이뷰 격자 단일 소스 — 검수앱 BayPlan이 쓰는 바로 그 모듈들을 임포트해 재사용
 import { getShipBayDictData } from './shipStructure.js';
 import { isLoloShipByPolicy } from './shipPolicies.js';   // ConeOne 1.2-01: LOLO 판정 통합
@@ -146,7 +146,8 @@ export function buildConeBayGrid(containers, shipInfo) {
     if (!dict || !dict.bayDef || !dict.bayDef.baysSummary) return {};
     const m = {};
     try {
-      const enrichedEntry = enrichBayDef({ bayDef: dict.bayDef }, dict._v5Matrix, containers, dict.source);
+      // TallyUni 0.7-02: 판정은 조회 경로가 아니라 항목 안쪽으로.
+      const enrichedEntry = enrichBayDef({ bayDef: dict.bayDef }, dict._v5Matrix, containers, isUserOwnedBayDict(dict) ? 'user' : dict.source);
       enrichedEntry.bayDef.baysSummary.forEach(b => { m[parseInt(b.bayNo, 10)] = b; });
     } catch (e) { console.warn('[ConeOne 1.2] 베이사전 보강 실패', e); return {}; }
     return m;

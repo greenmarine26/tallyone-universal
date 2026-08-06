@@ -14,7 +14,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Maximize2, Printer } from 'lucide-react';   // V8.25: ZoomIn/ZoomOut 제거(핀치 전용)
-import { isoToLabel, isoToPdfLabel, fmtPos, normalizeBay, getPortColor, isReeferContainer, isISO403, isISO403PhotoTaken, isBookingSlot, getContainerColorKey, buildContainerColorMap, COLOR_PALETTE, isPyeongtaekPort , slotAdjacencyError } from '../utils.js';
+import { isoToLabel, isoToPdfLabel, fmtPos, normalizeBay, getPortColor, isReeferContainer, isISO403, isISO403PhotoTaken, isBookingSlot, getContainerColorKey, buildContainerColorMap, COLOR_PALETTE, isPyeongtaekPort , slotAdjacencyError, isUserOwnedBayDict } from '../utils.js';
 import { getShipBayDictData } from '../shipStructure.js';
 import { extractShipMetaFromVoyage } from '../shipMatrixBuilder.js';
 import { enrichBayDef } from '../bayDictAutoEnrich.js';
@@ -269,11 +269,12 @@ export default function BayPlan({ containers, compMap, xrayMap, restowMap, mode,
     const dict = getShipBayDictData(shipImo, shipName, { ediBayCount, vslCode: _vslCode });
     if (!dict?.bayDef?.baysSummary) return {};
     // source='user'면 보강 차단, AI 임시는 L4 EDI 보정
+    //   TallyUni 0.7-02: 판정은 조회 경로가 아니라 항목 안쪽으로.
     const enrichedEntry = enrichBayDef(
       { bayDef: dict.bayDef },
       dict._v5Matrix,
       containers,
-      dict.source
+      isUserOwnedBayDict(dict) ? 'user' : dict.source
     );
     const m = {};
     enrichedEntry.bayDef.baysSummary.forEach(b => {

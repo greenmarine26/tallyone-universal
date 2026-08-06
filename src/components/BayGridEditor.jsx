@@ -17,7 +17,7 @@ import { createPortal } from 'react-dom';
 import { X, Save, Undo2 } from 'lucide-react';
 import { getShipBayDictData } from '../shipStructure.js';
 import { enrichBayDef } from '../bayDictAutoEnrich.js';
-import { isoToLabel, buildContainerColorMap, getContainerColorKey, isPyeongtaekPort } from '../utils.js';
+import { isoToLabel, buildContainerColorMap, getContainerColorKey, isPyeongtaekPort, isUserOwnedBayDict } from '../utils.js';
 import { autoPairBays, generatePdfBays, buildPosMap, computeBayRenderData, defaultGetSelfMark } from '../cargoPlanCore.js';
 import { BayBoxV2, CARGO_V2_CSS } from './PrintableCargoPlanV2.jsx';
 import * as P from '../planEditCore.js';
@@ -191,8 +191,10 @@ export default function BayGridEditor({
     if (!containers.length || (!shipImo && !shipName)) return null;
     const base = getShipBayDictData(shipImo || '', shipName || '', { ediBayCount: ediBayNums.length, vslFull: shipName || '' });
     if (!base) return null;
-    const en = enrichBayDef({ bayDef: base.bayDef }, base._v5Matrix, containers, base.source);
-    return { ...base, bayDef: { ...en.bayDef, source: base.source } };
+    // TallyUni 0.7-02: 판정은 조회 경로가 아니라 항목 안쪽으로.
+    const _isUser = isUserOwnedBayDict(base);
+    const en = enrichBayDef({ bayDef: base.bayDef }, base._v5Matrix, containers, _isUser ? 'user' : base.source);
+    return { ...base, bayDef: { ...en.bayDef, source: base.source, _userOwned: _isUser }, _userOwned: _isUser };
   }, [containers, shipImo, shipName, ediBayNums]);
 
   const matrixBays = useMemo(() => {
@@ -215,7 +217,7 @@ export default function BayGridEditor({
       bays = summary.map((s) => ({ bayNum: Number(s.bayNo), cells: [], hasHold: !!s.hasHold, hasDeck: s.hasDeck !== false, isStandalone: !!s.isStandalone }));
     }
     if (rawM.length > 0 && summary.length > 0) {
-      if (dictData.source === 'user') {
+      if (isUserOwnedBayDict(dictData)) {   // TallyUni 0.7-02: 조회 경로 아님 — 항목 안쪽
         const allow = new Set(summary.map((s) => Number(s.bayNo)).filter(Number.isFinite));
         bays = rawM.filter((b) => allow.has(Number(b.bayNum)));
       } else {
@@ -682,8 +684,9 @@ export default function BayGridEditor({
       <div className="bge-head">
         <h1>{title}</h1>
         {subtitle && <span className="bge-badge">{subtitle}</span>}
-        <span className={`bge-badge${dictData?.source === 'user' ? '' : ' warn'}`}>
-          {dictData?.source === 'user' ? '★정본' : '⚠비정본'} {dictData?.code || '?'} · {(dictData?.bayDef?.baysSummary || []).length}베이
+        {/* TallyUni 0.7-02: 배지 판정도 항목 안쪽으로 */}
+        <span className={`bge-badge${isUserOwnedBayDict(dictData) ? '' : ' warn'}`}>
+          {isUserOwnedBayDict(dictData) ? '★정본' : '⚠비정본'} {dictData?.code || '?'} · {(dictData?.bayDef?.baysSummary || []).length}베이
         </span>
         {headerExtra}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 5 }}>
