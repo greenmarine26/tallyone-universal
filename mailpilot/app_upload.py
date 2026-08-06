@@ -28,8 +28,10 @@ import time
 import berth_schedule as bsch                       # 0.6 — 터미널 선석배정(항차의 진실)
 import edi_parser as ep
 
-STATE_V = 2                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
+STATE_V = 3                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
                                   #   1→2 : 0.9 리스트(records) 업로드가 붙었다.
+                                  #   2→3 : 0.10 방향 판정이 넓어졌다 — 0.9 가 건너뛴 리스트를
+                                  #         한 번 다시 읽어야 한다(내용은 그대로, 판정만 달라진다).
 PARSER_TAG = "MailPilot Uni 0.7 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
