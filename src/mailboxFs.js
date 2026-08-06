@@ -149,14 +149,25 @@ export async function listVoyageFiles(root, vessel, voy, mode) {
   //   검수사 확정 규칙(2026-08-06): **폴더만** `2606N(D)` / `2606N(L)` 로 나누고, 서류 표기는 `2606N` 그대로.
   //   기존 단일 폴더(`2606N`)도 계속 찾는다 — 이미 쌓인 메일함이 그대로 열려야 한다.
   //   폴더를 **만드는** 쪽은 수집기 몫이다 — 앱은 읽는 쪽 폴백만 담당한다.
+  //
+  // TallyUni 0.7-01: 방향 폴더와 무표시 폴더를 **합쳐서** 읽는다.
+  //   왜 — 수집기 0.11은 파일 하나하나를 읽어 방향을 가르고, **가려지지 않는 파일**(적부도·Summary PDF 등)은
+  //   추측하지 않고 무표시 `2606N` 폴더에 그대로 둔다. 0.7은 방향 폴더가 있으면 거기서 멈춰
+  //   그 PDF들이 앱 목록에 아예 안 보였다(SWSP 2606N 실측: PDF 4장 실종, 2026-08-06).
+  //   방향 폴더 우선 — 같은 파일명이 양쪽에 있으면 방향 폴더 것만 쓴다(그쪽이 가려진 결과다).
+  //   방향 폴더가 없으면 종전과 똑같이 무표시 폴더만 읽는다.
   const dirTag = mode === 'discharge' ? 'D' : mode === 'loading' ? 'L' : '';
   const voyNames = dirTag ? [`${voy}(${dirTag})`, voy] : [voy];
-  const findVoyDir = async (parent) => {
+  // 찾은 항차 폴더를 **전부** 순서대로 돌려준다(방향 폴더가 앞). 하나도 없으면 빈 배열.
+  const findVoyDirs = async (parent) => {
+    const hits = [];
     for (const nm of voyNames) {
       const hit = await findDir(parent, nm);
-      if (hit) return hit;
+      if (!hit) continue;
+      if (hits.some((h) => h.handle === hit.handle || norm(h.name) === norm(hit.name))) continue;
+      hits.push(hit);
     }
-    return null;
+    return hits;
   };
 
   // V9.47: **어느 층을 연결했든** 찾아간다. 검수사가 MAILBOX를 고를 수도, 선박 폴더를 고를 수도,
@@ -164,21 +175,22 @@ export async function listVoyageFiles(root, vessel, voy, mode) {
   //     ① root/{선박}/{항차}   ← MAILBOX 를 연결한 경우 (권장 — 한 번으로 전 선박이 풀린다)
   //     ② root/{항차}          ← 선박 폴더를 연결한 경우
   //     ③ root 자체가 그 항차   ← 항차 폴더를 연결한 경우
-  let yDir = null, base = '';
+  let yDirs = [], base = '';
   const vDir = await findDir(root, vessel);
   if (vDir) {
-    const y = await findVoyDir(vDir.handle);
-    if (y) { yDir = y; base = `${vDir.name}/${y.name}`; }
+    const ys = await findVoyDirs(vDir.handle);
+    if (ys.length) { yDirs = ys; base = `${vDir.name}/${ys.map((y) => y.name).join(' + ')}`; }
   }
-  if (!yDir) {
-    const y2 = await findVoyDir(root);                         // ② 선박 폴더를 연결했다
-    if (y2) { yDir = y2; base = `${root.name || ''}/${y2.name}`; }
+  if (!yDirs.length) {
+    const ys2 = await findVoyDirs(root);                       // ② 선박 폴더를 연결했다
+    if (ys2.length) { yDirs = ys2; base = `${root.name || ''}/${ys2.map((y) => y.name).join(' + ')}`; }
   }
-  if (!yDir && voyNames.some(nm => norm(root.name) === norm(nm))) {   // ③ 항차 폴더를 연결했다
-    yDir = { name: root.name, handle: root };
+  if (!yDirs.length && voyNames.some(nm => norm(root.name) === norm(nm))) {   // ③ 항차 폴더를 연결했다
+    // 항차 폴더 자체를 연결하면 형제 폴더(무표시/방향)는 핸들이 없어 볼 수 없다 — 연결한 그 폴더만 읽는다.
+    yDirs = [{ name: root.name, handle: root }];
     base = root.name;
   }
-  if (!yDir) {
+  if (!yDirs.length) {
     // 못 찾았을 때는 추측하지 않고, 지금 연결된 폴더에 무엇이 있는지 그대로 보여준다.
     return { ok: false, reason: vDir ? 'no-voy' : 'no-vessel', files: [],
              dirs: await listDirs(vDir ? vDir.handle : root),
@@ -186,14 +198,20 @@ export async function listVoyageFiles(root, vessel, voy, mode) {
              rootName: root.name || '' };
   }
   const files = [];
-  for await (const [name, h] of yDir.handle.entries()) {
-    if (h.kind !== 'file' || isNoise(name)) continue;
-    let size = 0, at = 0;
-    try {
-      const f = await h.getFile();
-      size = f.size; at = f.lastModified;
-    } catch { /* 접근 실패한 파일은 크기 없이 표시 */ }
-    files.push({ name, size, at, target: suggestTarget(name), handle: h });
+  const seen = new Set();                     // 파일명 기준 중복 제거 — 앞선 폴더(방향)가 이긴다
+  for (const yDir of yDirs) {
+    for await (const [name, h] of yDir.handle.entries()) {
+      if (h.kind !== 'file' || isNoise(name)) continue;
+      const key = norm(name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let size = 0, at = 0;
+      try {
+        const f = await h.getFile();
+        size = f.size; at = f.lastModified;
+      } catch { /* 접근 실패한 파일은 크기 없이 표시 */ }
+      files.push({ name, size, at, target: suggestTarget(name), handle: h, dir: yDir.name });
+    }
   }
   files.sort((a, b) => (b.at || 0) - (a.at || 0));
   return { ok: true, dirPath: base, files, dirs: [], rootName: root.name || '' };

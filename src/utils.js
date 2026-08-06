@@ -1,6 +1,6 @@
 // 공통 유틸리티 — V48 (2026.05.09 / M4.9e)
 import { tenant, TENANT_DEFAULTS, TENANT_SK } from './tenant.js';
-export const APP_VERSION = 'TallyUni 0.7';   // N_N 방향 수리 — 한 폴더에 섞여 온 양하·선적 리스트 분리 + 모항 코드 변형(PTK02·PYONGTAEK) 인식
+export const APP_VERSION = 'TallyUni 0.7-01';   // 메일함 파일 목록 — 방향 폴더 `2606N(D)`와 무표시 `2606N`을 합쳐 읽는다(수집기가 방향을 못 가린 PDF 실종 수리)
 
 // ── V9.04-01: 가상(더미) 컨번호 판정 — MCSN 629S 사건 2026-07-18 ─────────
 //   실번호는 ISO 6346 규칙상 4번째 글자가 항상 U/J/Z (MSKU…, TCLU…). 플래너·수집기가
