@@ -94,7 +94,8 @@ cp dist/index.html ./
 [ -d dist/tally_templates ] && rm -rf ./tally_templates && cp -r dist/tally_templates ./
 # TallyUni 0.9: 기본 선박 사전 씨앗도 루트로 — Pages 두 경로(Actions dist / 브랜치 루트) 어느
 #   쪽이 서빙되든 /seed/ship_bay_dict_seed.json 이 있어야 마법사·관리자 버튼이 사전을 심는다.
-[ -d dist/seed ] && rm -rf ./seed && cp -r dist/seed ./ && echo "  ✓ seed/ 루트 복사 ($(du -h dist/seed/ship_bay_dict_seed.json 2>/dev/null | cut -f1))"
+# (보안 보류 2026-08-06) 사전 씨앗은 공개 저장소에 싣지 않는다 — 비공개 전달 방식 확정 전까지 복사 중단.
+# [ -d dist/seed ] && rm -rf ./seed && cp -r dist/seed ./ && echo "  ✓ seed/ 루트 복사"
 # 콘앱(독립 파일): dist의 cone.html을 루트로 복사 (Pages가 루트 서빙). 검수앱과 무관.
 [ -f dist/cone.html ] && cp dist/cone.html ./
 # V7.46: 콘앱용 본체 카고플랜 V2 번들 — 같은 소스(PrintableCargoPlanV2+cargoPlanCore+사전)를 React째 번들
@@ -142,19 +143,9 @@ if [ ! -f "$REFCSS" ]; then
 fi
 echo "✓ 루트 참조 파일 존재 확인: $REFJS, $REFCSS"
 
-# TallyUni 0.9: 씨앗 파일이 산출물에 실제로 들어갔는지 — 없으면 설치가 빈 사전으로 끝난다.
-for SEEDP in dist/seed/ship_bay_dict_seed.json seed/ship_bay_dict_seed.json; do
-  if [ ! -f "$SEEDP" ]; then
-    echo "✗ $SEEDP 없음 — 기본 사전 씨앗 누락 (public/seed/ 확인, tools/make_baydict_seed.cjs 로 재생성)"
-    exit 1
-  fi
-done
-SEEDN=$(node -e "const d=require('./dist/seed/ship_bay_dict_seed.json');console.log(Object.keys(d.ships||{}).length)")
-if [ "$SEEDN" -lt 1 ]; then
-  echo "✗ 씨앗에 선박 0척 — 배포 금지"
-  exit 1
-fi
-echo "✓ 기본 사전 씨앗 ${SEEDN}척 ($(du -h dist/seed/ship_bay_dict_seed.json | cut -f1))"
+# (보안 보류 2026-08-06) 씨앗 검증 중단 — 사전 씨앗은 공개 저장소·공개 사이트에 싣지 않는다.
+# 비공개 전달 방식(로컬 파일 가져오기 등) 확정 후 그 경로에 맞는 검증으로 되살린다.
+echo "✓ 사전 씨앗 검증 생략(공개 배포 금지 보류 중)"
 
 # V9.23-06: 렌더 연막검사 — 실제로 한 번 그려 본다.
 #   빌드 성공·번들 grep 통과에도 앱이 죽은 사고(hidden→issues TDZ)를 겪었다.
