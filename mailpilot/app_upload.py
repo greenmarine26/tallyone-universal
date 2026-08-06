@@ -6,6 +6,7 @@
   voyages/{키}/{discharge|loading}/ediContainers    → 진행막대·베이플랜·카고플랜이 산다
   voyages/{키}/{discharge|loading}/raw/edi          → 앱에서 다시 판독할 수 있는 원문
   voyages/{키}/{discharge|loading}/records          → 매칭·누락(실번호·무게·온도) — 0.9
+  voyages/{키}/{discharge|loading}/dataAt           → 자료 갱신 시각(ms) — 0.12
 
 절대 보존 원칙(현장 수집기 autoreg.py 에서 그대로 가져온다):
   · info 는 **없을 때만** 만든다. 이미 있으면 빈 voy_d/voy_l 만 채운다 — 사람이 넣은 값은 절대 안 건드린다.
@@ -14,6 +15,8 @@
   · 방향 필터로 전량 제외되면 PUT 자체를 하지 않는다 — 빈 PUT 은 RTDB 에서 '노드 삭제'다.
   · None(null) 을 절대 보내지 않는다 — RTDB 에서 null 은 '지우기'다.
   · 좌표(bay/row/tier…)는 PUT 전에 기존 노드에서 물려받는다 — 사람이 맞춘 자리를 지우지 않는다.
+  · dataAt 은 **자료가 실제로 바뀐 때만** 찍는다(0.12) — 변화 없이 도는 사이클마다 찍으면
+    앱 홈 카드에 '✏ 수정본'이 영원히 떠 있게 된다.
 
 짝(E/W) 판단은 **증거가 있을 때만** 한다. 제목·첨부파일명에 '0221E&0222W' 같은 표기가 있어야
 한 항차로 묶는다. 증거가 없으면 항차별 개별 키로 둔다 — 추론으로 짝짓지 않는다(검수사 확정).
@@ -549,6 +552,28 @@ def merge_coords(old_edi, new_edi, log=None, mode=""):
     return new_edi, kept
 
 
+def touch_data_at(firebase, key, mode, log=None, changed=True, what=""):
+    """0.12 — `voyages/{키}/{방향}/dataAt` 에 자료 갱신 시각(ms)을 찍는다.
+
+    앱(TallyUni 0.10)의 홈 카드가 이 값 하나로 '갱신 …' / '✅ 자료 확정' / '✏ 수정본' 을 가른다.
+    앱만 찍으면 수집기가 REST 로 직접 올린 자동등록분의 갱신이 안 보이고, 수집기만 찍으면
+    검수사가 직접 올린 자료의 갱신이 안 보인다 — **두 쪽이 같이 채워야 의미가 생기는 노드**다.
+
+    ⚠ `changed=False` 면 아무것도 하지 않는다. 자료가 그대로인데 사이클마다 시각을 올리면
+      확정된 항차가 계속 '수정본'으로 뒤집혀 표기가 쓸모없어진다(절차서 ④-4).
+    실패해도 업로드 자체를 실패로 만들지는 않되, 조용히 넘기지도 않는다.
+    """
+    if not changed:
+        return False
+    if firebase.put("voyages/%s/%s/dataAt" % (key, mode), _now_ms()) is None:
+        if log:
+            log("    ⚠ %s 자료 갱신 시각(dataAt) 기록 실패 — 앱 카드가 '갱신' 대신 EDI 시각으로 떨어집니다." % mode)
+        return False
+    if log and what:
+        log("    · %s %s 갱신 — 자료 갱신 시각 기록" % (mode, what))
+    return True
+
+
 def strip_nulls(obj):
     """RTDB 로 나가는 값에서 None 을 없앤다(null 은 '지우기'다). 남길 자리는 빈 문자열."""
     if isinstance(obj, dict):
@@ -744,9 +769,16 @@ def upload_mode(firebase, key, mode, cand, aliases, log):
         old = None
         log("    ⚠ %s 좌표 보존 실패(%s: %s) — 보존 없이 계속" % (mode, type(exc).__name__, exc))
     kept, _ = merge_coords(old if isinstance(old, dict) else {}, kept, log, mode)
-    if firebase.put("voyages/%s/%s/ediContainers" % (key, mode), strip_nulls(kept)) is None:
+    payload = strip_nulls(kept)
+    if firebase.put("voyages/%s/%s/ediContainers" % (key, mode), payload) is None:
         log("    ✗ %s EDI 업로드 실패 — 다음 사이클에 다시 시도합니다." % mode)
         return 0, False
+    # 0.12 — 자료 갱신 시각. 앱 홈 카드가 "갱신 …/✅자료 확정/✏수정본"을 이 값으로 판정한다
+    #   (앱 쪽 짝은 TallyUni 0.10 firebase.js `_touchDataAt` — **같은 노드**다).
+    #   ⚠ 실제로 바뀐 때만 찍는다. 리스트 한 장이 새로 와서 폴더 지문이 달라지면 이 함수는 같은 EDI 를
+    #     다시 PUT 하는데, 그때마다 갱신 시각을 올리면 확정된 항차가 계속 '수정본'으로 뒤집힌다.
+    touch_data_at(firebase, key, mode, log, changed=(payload != (old if isinstance(old, dict) else None)),
+                  what="EDI")
     text = cand["text"]
     ok = firebase.put("voyages/%s/%s/raw/edi" % (key, mode), {
         "text": text[:RAW_TEXT_LIMIT],
@@ -1262,6 +1294,9 @@ def upload_lists(firebase, key, mode, files, log):
     if firebase.put(path, strip_nulls(merged)) is None:
         log("    ✗ %s 리스트 업로드 실패 — 다음 사이클에 다시 시도합니다." % mode)
         return 0, 0, conflicts, False
+    # 0.12 — 리스트가 실제로 바뀐 때만 갱신 시각을 올린다(위 EDI 와 같은 노드).
+    #   여기까지 왔다는 것은 바로 위에서 `merged == old` 를 이미 걸러냈다는 뜻이다.
+    touch_data_at(firebase, key, mode, log, changed=True, what="리스트")
     log("    ↑ 리스트 올림: %s %s 추가 %d·빈칸 채움 %d·충돌 %d (%s)"
         % (key, mode, added, filled, conflicts,
            ", ".join(f["name"] for f in sorted(files, key=lambda f: (f["rank"], f["mtime"]),

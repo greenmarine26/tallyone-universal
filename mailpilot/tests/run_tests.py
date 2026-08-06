@@ -4498,6 +4498,110 @@ def _edi_leg(voy, vessel, pol, pod, cns):
     return "\n".join(out)
 
 
+def test_data_at():
+    print("\n[33] 0.12 자료 갱신 시각(dataAt) — 실제로 바뀐 때만 찍는다")
+    import app_upload as au
+
+    def _cand(cns, name="EDI.edi"):
+        cons = [{"cn": cn, "pod": "KRPTK", "pol": "CNSHA", "iso": "22G0",
+                 "bay": "01", "row": "02", "tier": "82"} for cn in cns]
+        return {"containers": cons, "text": "UNB+…", "name": name, "total": len(cons), "dir": "discharge"}
+
+    KEY, MODE = "STSE_2657E", "discharge"
+    NODE = "voyages/%s/%s/dataAt" % (KEY, MODE)
+
+    # (1) 첫 EDI 업로드 — 노드 경로·형식
+    db = FakeDB({})
+    n, ok = au.upload_mode(db, KEY, MODE, _cand(["ABCU1234567", "ABCU1234568"]), None, _quiet)
+    puts = [c for c in db.writes("PUT") if c[1] == NODE]
+    check("EDI 첫 업로드 — dataAt 을 정확한 노드에 한 번 찍는다",
+          n == 2 and ok and len(puts) == 1, "PUT %s" % [c[1] for c in db.writes("PUT")])
+    val = puts[0][2] if puts else None
+    check("dataAt 형식 — 정수 밀리초(현재 시각 언저리)",
+          isinstance(val, int) and not isinstance(val, bool)
+          and abs(val - int(time.time() * 1000)) < 60_000, repr(val))
+    check("dataAt 은 ediContainers 를 건드리지 않는 별개 노드",
+          isinstance(db.data.get("voyages/%s/%s/ediContainers" % (KEY, MODE)), dict)
+          and db.data.get(NODE) == val)
+
+    # (2) 같은 EDI 를 다시 올린다 — 리스트 한 장이 새로 와서 폴더 지문이 달라진 상황.
+    #     ediContainers 는 다시 PUT 되지만 dataAt 은 움직이면 안 된다(움직이면 '수정본'이 계속 뜬다).
+    before = db.data.get(NODE)
+    db.calls = []
+    au.upload_mode(db, KEY, MODE, _cand(["ABCU1234567", "ABCU1234568"]), None, _quiet)
+    check("⛔ 내용이 같으면 dataAt 을 올리지 않는다(수정본 오표기 방지)",
+          not [c for c in db.writes("PUT") if c[1] == NODE] and db.data.get(NODE) == before,
+          "PUT %s" % [c[1] for c in db.writes("PUT")])
+    db.calls = []
+    au.upload_mode(db, KEY, MODE, _cand(["ABCU1234567", "ABCU1234568"], name="같은내용_다른파일명.edi"),
+                   None, _quiet)
+    check("⛔ 파일 이름만 달라도 내용이 같으면 dataAt 무변",
+          not [c for c in db.writes("PUT") if c[1] == NODE] and db.data.get(NODE) == before)
+
+    # (3) EDI 가 실제로 바뀌면 올린다
+    db.calls = []
+    au.upload_mode(db, KEY, MODE, _cand(["ABCU1234567", "ABCU1234568", "ABCU1234569"]), None, _quiet)
+    after = db.data.get(NODE)
+    check("EDI 가 실제로 바뀌면 dataAt 을 갱신한다",
+          len([c for c in db.writes("PUT") if c[1] == NODE]) == 1 and after >= before, "%s→%s" % (before, after))
+
+    # (4) 방향 필터로 전량 제외 — PUT 자체가 없으니 dataAt 도 없다
+    db2 = FakeDB({})
+    cand = _cand(["ABCU1234567"])
+    cand["containers"][0]["pod"] = "KRPUS"
+    n2, ok2 = au.upload_mode(db2, KEY, MODE, cand, None, _quiet)
+    check("전량 제외 — ediContainers 도 dataAt 도 안 쓴다(빈 PUT 은 노드 삭제)",
+          n2 == 0 and ok2 and not db2.writes("PUT"))
+
+    # (5) 리스트 — 바뀐 때만
+    recs = [{"cn": "ABCU1234567", "sl": "S1", "pod": "KRPTK", "pol": "CNSHA"},
+            {"cn": "ABCU1234568", "sl": "S2", "pod": "KRPTK", "pol": "CNSHA"}]
+    files = [_lu_file("CLL.xlsx", [dict(r, _source="CLL.xlsx") for r in recs], mtime=1.0)]
+    db3 = FakeDB({})
+    au.upload_lists(db3, KEY, MODE, files, _quiet)
+    check("리스트 첫 업로드 — dataAt 을 찍는다",
+          len([c for c in db3.writes("PUT") if c[1] == NODE]) == 1,
+          "PUT %s" % [c[1] for c in db3.writes("PUT")])
+    stamp = db3.data.get(NODE)
+    db3.calls = []
+    au.upload_lists(db3, KEY, MODE, files, _quiet)
+    check("⛔ 리스트가 그대로면 records 도 dataAt 도 안 쓴다(멱등)",
+          not db3.writes("PUT") and db3.data.get(NODE) == stamp,
+          "PUT %s" % [c[1] for c in db3.writes("PUT")])
+    files2 = [_lu_file("CLL2.xlsx",
+                       [dict(r, _source="CLL2.xlsx") for r in recs]
+                       + [{"cn": "ABCU1234570", "sl": "S3", "pod": "KRPTK", "pol": "CNSHA",
+                           "_source": "CLL2.xlsx"}], mtime=2.0)]
+    db3.calls = []
+    au.upload_lists(db3, KEY, MODE, files2, _quiet)
+    check("리스트에 새 컨이 붙으면 dataAt 을 갱신한다",
+          len([c for c in db3.writes("PUT") if c[1] == NODE]) == 1
+          and db3.data.get(NODE) >= stamp)
+
+    # (6) 조용한 실패 금지 — dataAt 쓰기가 실패해도 업로드는 성공으로 보고하되 로그가 남는다
+    class _NoDataAt(FakeDB):
+        def put(self, path, obj):
+            if str(path).strip("/").endswith("/dataAt"):
+                self.calls.append(("PUT", str(path).strip("/"), obj))
+                return None                            # 타임아웃·인증 실패 → FirebaseREST 는 None
+            return FakeDB.put(self, path, obj)
+    lines = []
+    db4 = _NoDataAt({})
+    n4, ok4 = au.upload_mode(db4, KEY, MODE, _cand(["ABCU1234567"]), None, lines.append)
+    check("dataAt 실패 — EDI 업로드는 성공으로 보고(자료가 우선)", n4 == 1 and ok4 is True)
+    check("dataAt 실패 — 조용히 넘기지 않고 사유를 남긴다",
+          any("dataAt" in m for m in lines), repr(lines[-1:]))
+
+    # (7) 헬퍼 자체 — changed=False 면 아무것도 안 한다
+    db5 = FakeDB({})
+    r = au.touch_data_at(db5, KEY, MODE, _quiet, changed=False)
+    check("touch_data_at(changed=False) — 쓰기 0 · False 반환", r is False and not db5.writes("PUT"))
+    r = au.touch_data_at(db5, KEY, "loading", _quiet, changed=True)
+    check("touch_data_at — 방향별로 따로 찍는다(양하/선적 독립)",
+          r is True and "voyages/%s/loading/dataAt" % KEY in db5.data
+          and NODE not in db5.data)
+
+
 def test_nn_folders():
     print("\n[32] 0.11 N_N 방향 폴더 — 같은 토큰 기항만 (D)/(L) 로 나눈다(서류 표기는 그대로)")
     import app_upload as au
@@ -4859,6 +4963,7 @@ def main():
     test_list_upload()
     test_content_read()
     test_nn_folders()
+    test_data_at()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)
