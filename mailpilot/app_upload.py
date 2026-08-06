@@ -28,10 +28,12 @@ import time
 import berth_schedule as bsch                       # 0.6 — 터미널 선석배정(항차의 진실)
 import edi_parser as ep
 
-STATE_V = 3                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
+STATE_V = 4                       # 올리는 규칙이 바뀌면 올린다(옛 지문 무효화 → 한 번 재업로드)
                                   #   1→2 : 0.9 리스트(records) 업로드가 붙었다.
                                   #   2→3 : 0.10 방향 판정이 넓어졌다 — 0.9 가 건너뛴 리스트를
                                   #         한 번 다시 읽어야 한다(내용은 그대로, 판정만 달라진다).
+                                  #   3→4 : 0.11 N_N 기항이 방향 폴더 `{voy}(D)`/`(L)` 로 갈린다.
+                                  #         폴더 묶음이 달라지므로 옛 지문을 한 번 무효화한다.
 PARSER_TAG = "MailPilot Uni 0.7 (edi_parser)"
 RAW_TEXT_LIMIT = 5_000_000        # raw/edi 에 담는 원문 길이 상한(현장 수집기와 같은 값)
 
@@ -171,6 +173,69 @@ def same_voyage(a, b):
     return ident_a == ident_b
 
 
+# ──────────── ㉯-3 방향 폴더 `{voy}(D)` · `{voy}(L)` — N_N 기항(0.11) ────────────
+#
+# 검수사 확정 규칙(2026-08-06 원문):
+#   "항차명과 항차수가 같다고 하더라도 폴더를 하나로 만들면 리스트가 섞일 수 있습니다.
+#    특히 N_N 타입이 그렇습니다. 이럴 때 **2606N(D)_2606N(L)로 폴더를 만들되
+#    서류 표기는 2606N 2606N으로** 기록해야 합니다."
+#
+# 왜 — 보통 배는 양하 항차와 선적 항차의 번호가 달라 폴더가 저절로 갈린다(2643E · 2644W).
+#   그런데 배정표 원문이 `2606N/2606N`(SWSP)·`2608N/2608N`(SWDN)·`2605W/2605W`(KBTR)처럼
+#   **양쪽이 같은 토큰**인 기항이 있다. 그런 배는 양하 리스트와 선적 리스트가 한 폴더에 섞이고,
+#   앱에서 그 폴더를 통째로 등록하면 두 리스트가 한쪽으로 합산된다(실측 SWSP 2606N 371+349).
+#   앱(TallyUni 0.7)은 이미 `{voy}(D)`/`{voy}(L)` 를 먼저 찾고 없으면 `{voy}` 로 폴백한다.
+#   **폴더를 만드는 쪽이 수집기 몫**이다.
+#
+# 갈리는 것은 **폴더 이름뿐**이다 — 항차 키·info(voy·voy_d·voy_l)·records 어디에도
+# `(D)`/`(L)` 문자열은 나가지 않는다(서류 표기는 `2606N` 그대로).
+# 방향을 못 가린 파일은 옮기지 않고 무표시 `{voy}/` 에 그대로 둔다(추측 금지).
+DIR_TAGS = {"discharge": "D", "loading": "L"}
+_TAG_DIR = {"D": "discharge", "L": "loading"}
+_DIR_TAG_RE = re.compile(r"^(.*?)\(\s*([DL])\s*\)$", re.I)
+
+
+def split_dir_tag(name):
+    """폴더 이름 → (항차표기, 방향).
+
+    '2606N(D)' → ('2606N', 'discharge') · '2606N(L)' → ('2606N', 'loading') ·
+    '2643E' → ('2643E', '')  — 무표시 폴더는 오늘과 똑같이 다룬다.
+    """
+    text = str(name or "").strip()
+    match = _DIR_TAG_RE.match(text)
+    if not match:
+        return text, ""
+    return match.group(1).strip(), _TAG_DIR[match.group(2).upper()]
+
+
+def tag_voy(voy, mode=""):
+    """항차 표기 + 방향 → 폴더 이름. 방향이 없으면 표기 그대로(꼬리표를 붙이지 않는다)."""
+    text = str(voy or "").strip()
+    tag = DIR_TAGS.get(mode or "")
+    return "%s(%s)" % (text, tag) if tag else text
+
+
+def folder_direction(path, voy):
+    """이 항차 폴더가 말하는 방향 — 방향 폴더면 그 꼬리표, 아니면 항차 끝 글자(종전 규칙)."""
+    _base, tag = split_dir_tag(os.path.basename(str(path or "")))
+    return tag or voy_direction(voy)
+
+
+def nn_token(cache, code, voy):
+    """이 기항이 N_N(양하·선적 항차가 **같은 토큰**)인가 → 그 항차 표기. 아니면 ''.
+
+    근거는 짝 증거 캐시뿐이다(배정표 원문 짝은 promote_pairs 가 여기에 올려 둔다).
+    증거가 없으면 '' — 번호가 같아 보인다는 이유로 갈라내지 않는다(추측 금지).
+    """
+    text = str(voy or "").strip().upper()
+    if not text:
+        return ""
+    partner = paired_partner(cache, code, text)
+    if partner and same_voyage(partner, text):
+        return text
+    return ""
+
+
 def _dir_files(path):
     """폴더 안 '파일'만. 못 읽으면 빈 목록(조용히 죽지 않는다)."""
     try:
@@ -189,10 +254,15 @@ def _folder_rank(path, names):
     return (len(names), 1 if has_edi else 0, -born)
 
 
-def canonical_voy_dirname(vessel_dir, voy):
-    """선박 폴더 안에서 이 항차와 '같은 항차'인 기존 폴더 이름(정본). 없으면 ''."""
+def canonical_voy_dirname(vessel_dir, voy, mode=""):
+    """선박 폴더 안에서 이 항차와 '같은 항차'인 기존 폴더 이름(정본). 없으면 ''.
+
+    0.11 — mode 를 주면 **같은 꼬리표끼리만** 본다. 무표시(mode='')는 무표시 폴더끼리,
+    'discharge' 는 `(D)` 폴더끼리, 'loading' 은 `(L)` 폴더끼리. 기본값은 종전과 똑같다.
+    """
     if not vessel_dir or not os.path.isdir(vessel_dir):
         return ""
+    want = DIR_TAGS.get(mode or "") and mode or ""
     best, best_rank = "", None
     try:
         entries = sorted(os.listdir(vessel_dir))
@@ -200,7 +270,10 @@ def canonical_voy_dirname(vessel_dir, voy):
         return ""
     for name in entries:
         path = os.path.join(vessel_dir, name)
-        if not os.path.isdir(path) or not same_voyage(name, voy):
+        if not os.path.isdir(path):
+            continue
+        base, tag = split_dir_tag(name)
+        if tag != want or not same_voyage(base, voy):
             continue
         rank = _folder_rank(path, _dir_files(path))
         if best_rank is None or rank > best_rank:
@@ -522,6 +595,10 @@ def group_voyages(folders, cache):
                 voy_d = cand
             elif direction == "loading" and not voy_l:
                 voy_l = cand
+        if nn_token(cache, code, key_voy):
+            # 0.11 — 양하 항차와 선적 항차가 같은 토큰인 기항(2606N/2606N). 카드는 한 장이고
+            #   양쪽 표기가 다 그 항차다. 서류 표기는 `2606N` 그대로 — 꼬리표는 폴더에만 있다.
+            voy_d = voy_l = key_voy
         out.append((code, key_voy, sorted(entry["members"]), voy_d, voy_l))
     return out
 
@@ -914,6 +991,76 @@ def list_mode(dis_home, load_home, name, head_mode=""):
     return ""
 
 
+def _name_direction(text):
+    """이름(파일명·제목)의 방향 힌트만 본다 — CDL·DISCH=양하 · CLL·LOAD=선적. 둘 다/없으면 ''."""
+    dis_hint = bool(_HINT_DIS.search(str(text or "")))
+    load_hint = bool(_HINT_LOAD.search(str(text or "")))
+    if dis_hint and not load_hint:
+        return "discharge"
+    if load_hint and not dis_hint:
+        return "loading"
+    return ""
+
+
+def file_direction(name, data, aliases, log=None, hint=""):
+    """파일 하나가 **내용으로** 말하는 방향 — 'discharge' | 'loading' | ''(불명).
+
+    N_N 기항(2606N/2606N)의 파일을 `{voy}(D)` · `{voy}(L)` 중 어디에 둘지 정할 때 쓴다.
+    판독은 0.9/0.10 이 이미 쓰는 것을 그대로 부른다 — **파서 코어(edi_parser·list_parser) 무수정**.
+
+      ㉮ EDI/ASC : 컨의 POD 가 모항이면 양하 · POL 이 모항이면 선적(scan_candidates 와 같은 셈).
+      ㉯ 엑셀    : 컨별 항구 칸 → 시트 머리 블록(head_dest_mode) → 파일명 힌트(list_mode 그대로).
+      ㉰ 그 밖(PDF 등) : 이름 힌트만. 파일명이 안 되면 메일 제목(hint)을 본다.
+
+    가릴 수 없으면 '' 를 돌려준다 — 부르는 쪽은 그 파일을 옮기지 않고 무표시 폴더에 둔다.
+    """
+    text_name = str(name or "")
+    blob = bytes(data or b"")
+    if text_name.lower().endswith(EDI_EXTS):
+        body = blob.decode("latin1", "replace")
+        if ep.detect_kind(body, text_name):
+            try:
+                cons = (ep.parse_edi(body, text_name) or {}).get("containers") or []
+            except Exception as exc:                  # 한 파일이 깨져도 분리를 멈추지 않는다
+                cons = []
+                if log:
+                    log("    방향 판독 실패(%s) %s: %s" % (text_name, type(exc).__name__, exc))
+            dis_home = sum(1 for c in cons if is_home_port(c.get("pod"), aliases))
+            load_home = sum(1 for c in cons if is_home_port(c.get("pol"), aliases))
+            if dis_home > load_home:
+                return "discharge"
+            if load_home > dis_home:
+                return "loading"
+        return _name_direction(text_name) or _name_direction(hint)
+
+    lp, why = list_parser_mod()
+    if lp is not None and lp.detect_list_kind(text_name) == "list":
+        sheets, err = lp.read_sheets(blob, text_name)
+        if err:
+            if log:
+                log("    방향 판독 건너뜀(%s): %s" % (text_name, err))
+        elif lp.detect_list_kind(text_name, sheets) == "list" and not head_is_report(sheets):
+            try:
+                parsed = lp.parse_list_sheets(sheets, source=text_name)
+            except Exception as exc:                  # 판독이 깨져도 이름 힌트로 넘어간다
+                parsed = None
+                if log:
+                    log("    방향 판독 실패(%s) %s: %s" % (text_name, type(exc).__name__, exc))
+            recs = (parsed or {}).get("records") or []
+            if recs:
+                dis_home = sum(1 for r in recs if is_home_port(r.get("pod"), aliases))
+                load_home = sum(1 for r in recs if is_home_port(r.get("pol"), aliases))
+                head_mode = ""
+                if dis_home == load_home:
+                    head_mode, _head_why = head_dest_mode(sheets, aliases)
+                mode = list_mode(dis_home, load_home, text_name, head_mode)
+                if mode:
+                    return mode
+    elif lp is None and log:
+        log("    ⚠ 리스트 판독 모듈을 부르지 못해 이름으로만 방향을 봅니다 — %s" % why)
+    return _name_direction(text_name) or _name_direction(hint)
+
+
 def _list_empty(value):
     """리스트 병합에서 '빈 칸'인가 — 없음(None) · 빈 문자열 · 숫자 0.
     참/거짓은 빈 칸이 아니다(False 는 '아니다'라는 값이다)."""
@@ -1027,9 +1174,13 @@ def merge_into_records(old, new, log=None, mode=""):
     return out, added, filled, conflicts
 
 
-def scan_lists(folder, names, aliases, log, folder_dir=""):
+def scan_lists(folder, names, aliases, log, folder_dir="", tagged=False):
     """폴더의 리스트 엑셀을 전부 읽어 판독한다 — [{"name","rank","mtime","mode","records"}].
-    report(마감텔리·베이플랜)·XRAY·합본은 detect_list_kind 가 걸러 낸다."""
+    report(마감텔리·베이플랜)·XRAY·합본은 detect_list_kind 가 걸러 낸다.
+
+    tagged 는 이 폴더가 **방향 폴더**(`2606N(D)`/`(L)`)인가다. 방향 폴더의 꼬리표는 우리가
+    내용을 읽어 넣은 자리이므로, 내용·머리블록·파일명이 다 실패했을 때만 **마지막 근거**로 쓴다.
+    ⛔ 무표시 폴더의 E/W 는 여전히 근거로 쓰지 않는다(0.9 확정 — 짝 항차가 한 폴더에 있다)."""
     lp, why = list_parser_mod()
     if lp is None:
         log("    ⚠ 리스트 판독 모듈을 부르지 못해 리스트 단계를 건너뜁니다 — %s" % why)
@@ -1069,6 +1220,10 @@ def scan_lists(folder, names, aliases, log, folder_dir=""):
         if dis_home == load_home:                     # 컨별 항구 칸으로 못 가릴 때만 머리 블록을 본다
             head_mode, head_why = head_dest_mode(sheets, aliases)
         mode = list_mode(dis_home, load_home, name, head_mode)
+        if not mode and tagged and folder_dir:        # 0.11 — 방향 폴더의 꼬리표가 마지막 근거
+            mode = folder_dir
+            log("    · 방향 폴더 꼬리표로 %s 방향을 정합니다: %s"
+                % ("양하" if mode == "discharge" else "선적", name))
         if not mode:
             log("    ⤫ 리스트 방향을 가릴 수 없어 건너뜁니다: %s (컨 %d · 홈 POD %d · POL %d)"
                 % (name, len(recs), dis_home, load_home))
@@ -1148,9 +1303,11 @@ def voyage_folders(root, cache, master, log):
             vpath = os.path.join(path, vname)
             if not os.path.isdir(vpath):
                 continue
-            voy = vname.strip().upper()
+            # 0.11 — 방향 폴더 `2606N(D)`/`(L)` 는 꼬리표를 떼고 **같은 항차**로 읽는다.
+            #   돌려주는 항차 표기는 언제나 꼬리표 없는 `2606N` 이다(키·info 에 새지 않게).
+            voy, _tag = split_dir_tag(vname.strip().upper())
             if not voy_direction(voy):
-                log("  항차 방향을 못 읽어 건너뜁니다: %s/%s" % (code, voy))
+                log("  항차 방향을 못 읽어 건너뜁니다: %s/%s" % (code, vname))
                 continue
             try:
                 names = [f for f in os.listdir(vpath) if os.path.isfile(os.path.join(vpath, f))]
@@ -1184,8 +1341,12 @@ def handle_group(firebase, code, key_voy, members, voy_d, voy_l, aliases, log, i
     stats = {"added": 0, "filled": 0, "conflicts": 0, "files": 0, "modes": []}
     cands, lists = [], []
     for voy, path, names in members:
-        cands += scan_candidates(path, names, aliases, log, voy_direction(voy))
-        lists += scan_lists(path, names, aliases, log, voy_direction(voy))
+        # 0.11 — 방향 폴더(`(D)`/`(L)`)면 그 꼬리표가 이 폴더의 방향이다. 무표시 폴더는 종전대로
+        #   항차 끝 글자를 쓴다. 꼬리표는 우리가 내용을 읽어 넣은 자리라 리스트의 마지막 근거로도 쓴다.
+        _base, tag = split_dir_tag(os.path.basename(path))
+        fdir = tag or voy_direction(voy)
+        cands += scan_candidates(path, names, aliases, log, fdir)
+        lists += scan_lists(path, names, aliases, log, fdir, tagged=bool(tag))
 
     uploaded = 0
     if cands:
@@ -1242,10 +1403,12 @@ def merge_voy_dirs(vessel_dir, log):
         path = os.path.join(vessel_dir, name)
         if not os.path.isdir(path):
             continue
-        ident = voy_ident(name)
+        # 0.11 — 방향 폴더는 **같은 꼬리표끼리만** 합친다((D)와 (L)을 섞으면 리스트가 다시 섞인다).
+        base_voy, tag = split_dir_tag(name)
+        ident = voy_ident(base_voy)
         if ident is None:
             continue                                    # 항차로 못 읽는 폴더는 무접촉
-        buckets.setdefault(ident, []).append(name)
+        buckets.setdefault((ident, tag), []).append(name)
     for _ident, names in sorted(buckets.items()):
         if len(names) < 2:
             continue
@@ -1417,6 +1580,139 @@ def migrate_voyage_spelling(root, cache, master, firebase, log, state_path=None)
                len(result["deleted"]), len(result["held"]), result["errors"]))
     else:
         log("항차 표기 정규화 — 합칠 항차가 없습니다(표기 흔들림 0).")
+    return result
+
+
+# ──────────── ㉲-2 N_N 방향 폴더 분리 마이그레이션(0.11) ────────────
+#
+# 이미 한 폴더에 쌓인 N_N 기항(SWSP 2606N 이 실사례)을 `{voy}(D)` · `{voy}(L)` 로 나눈다.
+# 원칙은 앞의 두 이관과 같다 — **옮기기만** 한다. 파일을 지우지도 덮어쓰지도 않는다.
+#   · 대상   : 짝 증거가 '자기 자신'인 항차(nn_token) 의 **무표시 폴더**만. 일반 기항은 무접촉.
+#   · 방향   : file_direction(0.9/0.10 판독 그대로). 못 가리면 **옮기지 않고 그대로 둔다**.
+#   · 충돌   : 대상 자리에 같은 이름이 있으면 건너뛴다(그대로 둔다).
+#   · 껍데기 : 파일이 다 빠진 폴더만 rmdir(파일이 남으면 실패하고 그대로 남는다).
+# 여러 번 돌려도 안전하다(멱등) — 나눌 것이 없으면 파일을 열지도 않는다.
+
+def split_nn_folders(root, cache, master, aliases, log, state_path=None):
+    """N_N 기항 폴더를 방향 폴더로 나눈다. 돌려주는 값:
+    {"split": [(코드, 항차, 양하수, 선적수, 잔류수)], "moved", "skipped", "left", "errors"}"""
+    result = {"split": [], "moved": 0, "skipped": 0, "left": 0, "errors": 0, "codes": []}
+    if not root or not os.path.isdir(root):
+        log("N_N 방향 폴더 분리 — 메일박스 폴더가 없습니다: %s" % root)
+        return result
+    if not master:
+        log("N_N 방향 폴더 분리 — 선박 정본표가 없어 건너뜁니다.")
+        return result
+    core = _core()
+    for base in (root, os.path.join(root, core.OTHER_DIR)):
+        if not os.path.isdir(base):
+            continue
+        try:
+            entries = sorted(os.listdir(base))
+        except OSError as exc:
+            log("N_N 방향 폴더 분리 — 메일박스를 읽지 못했습니다(%s): %s" % (base, exc))
+            result["errors"] += 1
+            continue
+        for name in entries:
+            if name.startswith("_"):
+                continue                                # _기타·_미분류 등 살림 폴더는 무접촉
+            vessel_dir = os.path.join(base, name)
+            code = name.strip().upper()
+            if not os.path.isdir(vessel_dir) or not core.master_by_code(master, code):
+                continue                                # 정본표에 없는 폴더는 건드리지 않는다
+            try:
+                voys = sorted(os.listdir(vessel_dir))
+            except OSError as exc:
+                log("N_N 방향 폴더 분리 — 선박 폴더를 읽지 못했습니다(%s): %s" % (code, exc))
+                result["errors"] += 1
+                continue
+            for vname in voys:
+                vpath = os.path.join(vessel_dir, vname)
+                if not os.path.isdir(vpath):
+                    continue
+                base_voy, tag = split_dir_tag(vname.strip().upper())
+                if tag:
+                    continue                            # 이미 나뉜 폴더는 무접촉(멱등)
+                if not nn_token(cache, code, base_voy):
+                    continue                            # ⛔ 일반 기항(토큰 다른 짝)은 절대 안 건드린다
+                files = _dir_files(vpath)
+                if not files:
+                    continue
+                counts = {"discharge": 0, "loading": 0}
+                left_names = []
+                for fname in sorted(files):
+                    src = os.path.join(vpath, fname)
+                    try:
+                        with open(src, "rb") as fh:
+                            data = fh.read()
+                    except OSError as exc:
+                        log("  자료를 읽지 못해 그대로 둡니다: %s (%s)" % (src, exc))
+                        result["errors"] += 1
+                        left_names.append(fname)
+                        continue
+                    mode = file_direction(fname, data, aliases, log)
+                    if not mode:
+                        left_names.append(fname)
+                        continue
+                    dst_dir = os.path.join(vessel_dir, tag_voy(vname.strip(), mode))
+                    target = os.path.join(dst_dir, fname)
+                    if os.path.exists(target):
+                        result["skipped"] += 1
+                        log("  같은 이름이 이미 있어 건너뜁니다(그대로 둡니다): %s" % target)
+                        continue
+                    try:
+                        os.makedirs(dst_dir, exist_ok=True)
+                        os.rename(src, target)
+                    except OSError as exc:
+                        result["errors"] += 1
+                        left_names.append(fname)
+                        log("  파일을 옮기지 못해 그대로 둡니다: %s (%s)" % (src, exc))
+                        continue
+                    counts[mode] += 1
+                    result["moved"] += 1
+                result["left"] += len(left_names)
+                if not (counts["discharge"] or counts["loading"]):
+                    continue                            # 한 장도 못 가렸다 — 폴더를 그대로 둔다
+                result["split"].append((code, base_voy, counts["discharge"],
+                                        counts["loading"], len(left_names)))
+                if code not in result["codes"]:
+                    result["codes"].append(code)
+                log("  ↦ N_N 방향 분리: %s %s → (D) %d개 · (L) %d개 · 판독 불명 %d개"
+                    % (code, vname, counts["discharge"], counts["loading"], len(left_names)))
+                stay = sorted(_dir_files(vpath))        # 이름 충돌로 못 옮긴 것까지 실제 잔류 전부
+                if stay:
+                    # 앱은 (D)/(L) 를 먼저 읽는다 — (D) 가 생긴 뒤 무표시 폴더에 남은 파일은
+                    # 앱 화면에서 안 보일 수 있다. 조용히 넘기지 않고 크게 알린다.
+                    log("  ⚠⚠ %s %s — 무표시 폴더에 남은 파일 %d개(방향 불명 %d · 이름 충돌 %d): %s"
+                        % (code, vname, len(stay), len(left_names),
+                           len(stay) - len(left_names), ", ".join(stay[:10])
+                           + (" 외 %d개" % (len(stay) - 10) if len(stay) > 10 else "")))
+                    log("  ⚠⚠ 앱은 %s(D)/%s(L) 를 먼저 읽으므로 위 파일은 앱 목록에 안 보일 수 "
+                        "있습니다 — 사람이 방향을 확인해 주세요." % (vname, vname))
+                try:
+                    if os.path.isdir(vpath) and not os.listdir(vpath):
+                        os.rmdir(vpath)                 # 빈 껍데기만 치운다(파일이 남으면 실패한다)
+                        log("  빈 폴더를 치웠습니다: %s" % vpath)
+                except OSError as exc:
+                    log("  빈 폴더를 치우지 못해 그대로 둡니다: %s (%s)" % (vpath, exc))
+
+    if result["codes"] and state_path:                  # 나눈 선박은 이번 판에 다시 올린다
+        state = load_state(state_path)
+        drop = [rel for rel in list(state["folders"])
+                if str(rel).split("/")[0].strip().upper() in result["codes"]]
+        for rel in drop:
+            state["folders"].pop(rel, None)
+        if drop:
+            save_state(state, state_path, log)
+            log("N_N 방향 분리 — 업로드 지문 %d건 무효화(나눈 항차를 이번 판에 다시 올립니다): %s"
+                % (len(drop), ", ".join(sorted(drop))))
+
+    if result["split"] or result["errors"]:
+        log("N_N 방향 폴더 분리 완료 — 기항 %d개(파일 이동 %d · 건너뜀 %d · 불명 잔류 %d) · 실패 %d건"
+            % (len(result["split"]), result["moved"], result["skipped"],
+               result["left"], result["errors"]))
+    else:
+        log("N_N 방향 폴더 분리 — 나눌 기항이 없습니다(같은 토큰 짝 0).")
     return result
 
 
@@ -1617,6 +1913,16 @@ def promote_pairs(plan, cache, log):
             continue
         code = str(row.get("vessel_code") or "").upper()
         dis, load = row.get("voy_d") or "", row.get("voy_l") or ""
+        nn = False
+        if not dis or not load:
+            # 0.11 — N_N 기항. 배정표 원문 짝의 두 쪽이 **같은 토큰**(2606N/2606N)이면
+            #   berth_schedule 의 방향 필터가 한쪽을 비운다(2606N 은 선적 방향 표기가 아니다).
+            #   그 자리에 '자기 자신이 짝'이라는 증거를 남긴다 — 폴더를 (D)/(L) 로 나누는 근거다.
+            raw_d = str(row.get("voy_raw_d") or "").upper()
+            raw_l = str(row.get("voy_raw_l") or "").upper()
+            if raw_d and raw_l and same_voyage(raw_d, raw_l):
+                dis = load = raw_d
+                nn = True
         if not code or not dis or not load:
             continue
         table = cache.setdefault("pairs", {}).setdefault(code, {})
@@ -1624,8 +1930,9 @@ def promote_pairs(plan, cache, log):
             continue
         table[dis], table[load] = load, dis
         count += 1
-        log("  ↔ 배정표 짝 확정: %s %s ↔ %s (%s)"
-            % (code, dis, load, row.get("master_vvd") or row.get("terminal")))
+        log("  ↔ 배정표 짝 확정%s: %s %s ↔ %s (%s)"
+            % (" — 양하·선적이 같은 항차(N_N)" if nn else "", code, dis, load,
+               row.get("master_vvd") or row.get("terminal")))
     return count
 
 
@@ -1959,10 +2266,6 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
     aliases = home_aliases(cfg)
     state_path = state_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                             "upload_state.json")
-    state = load_state(state_path)
-    folders = voyage_folders(root, cache, master, log)
-    result["folders"] = len(folders)
-
     # 0차 — 선석배정표(항차의 진실). 못 받으면 게이트·정리를 통째로 건너뛴다(조용한 실패 금지).
     plan, why = fetch_plan(cfg, log, opener, now_ms)
     if plan is None:
@@ -1991,6 +2294,21 @@ def run(root, cache, master, firebase, cfg, log, state_path=None, reconcile=Fals
         except Exception as exc:                        # 예정등록이 죽어도 수집·업로드는 계속한다
             log("예정등록 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc))
             result["errors"] += 1
+
+    # 0.11 — N_N 기항(양하·선적 항차가 같은 토큰)의 폴더를 `{voy}(D)`/`(L)` 로 나눈다.
+    #   기동 뒤 한 번이면 된다(reconcile 과 같은 시점 — 배정표 짝이 캐시에 오른 직후다).
+    #   폴더를 나눈 뒤에 목록을 훑어야 나뉜 폴더가 이번 사이클에 바로 올라간다.
+    if reconcile:
+        try:
+            result["nnSplit"] = split_nn_folders(root, cache, master, aliases, log, state_path)
+            result["errors"] += result["nnSplit"]["errors"]
+        except Exception as exc:                        # 분리가 죽어도 수집·업로드는 계속한다
+            log("N_N 방향 폴더 분리 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc))
+            result["errors"] += 1
+
+    state = load_state(state_path)                      # 분리가 지문을 지운 뒤에 읽는다
+    folders = voyage_folders(root, cache, master, log)
+    result["folders"] = len(folders)
 
     # 1차 — 짝 증거부터 모은다(키를 정하기 전에 다 알고 있어야 한 키로 묶인다).
     for code, voy, _path, names in folders:

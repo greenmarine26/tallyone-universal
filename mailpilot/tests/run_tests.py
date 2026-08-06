@@ -45,6 +45,10 @@
      (내용>파일명>건너뜀) · 보수 머지(기존 값 불변·빈칸만·새 컨 추가·무삭제·멱등) ·
      검수원 입력 보호(rfSet·sl 수정 위에 재업로드 → 전값 불변) · GET 실패 시 PUT 0 ·
      의존성 부재 시 건너뜀 · 실파일 종단(미니 메일박스 → records 가 JS 정답표와 일치)
+ 32) 0.11 N_N 방향 폴더 — 같은 토큰 기항만 `{voy}(D)`/`(L)` 로 나눈다: 꼬리표 도구 ·
+     N_N 판정(같은 토큰만 · 일반 기항 무접촉) · 배정표 원문 짝 · 파일 방향 판독 ·
+     적재 분기 · 그룹 스캔/업로드 mode 배정 · **표기 누출 0**(info·records 전수) ·
+     리스트 꼬리표 되받이 · 마이그레이션(분할·충돌 스킵·불명 잔류·빈 폴더·지문·멱등)
  29) 0.9 리스트 엑셀 판독 모듈(list_parser) — 파일 종류 판정 · 표준/세관CDL/중국어/SOC 갈래 ·
      규격·풀공 판정표 · SheetJS 숫자 서식 재현 · 실파일 픽스처 8종 컨 단위 전 필드 스냅샷
      (기대값 정본은 검수앱 src/utils.js parseListExcel 을 node 로 돌린 결과)
@@ -4480,6 +4484,339 @@ def test_content_read():
 
 
 
+def _edi_leg(voy, vessel, pol, pod, cns):
+    """컨의 적재항(LOC+9)·목적항(LOC+11)이 든 최소 BAPLIE — 방향 판독의 오라클."""
+    out = ["UNB+UNOA:2+SENDER+RECV+260806:1200+1'",
+           "UNH+1+BAPLIE:D:95B:UN:SMDG20'", "BGM+45'",
+           "TDT+20+%s+++YTF:172:20+++9123456:103::%s'" % (voy, vessel),
+           "LOC+5+KRPTK:139:6'"]
+    for cn in cns:
+        out += ["LOC+147+0100284::5'", "MEA+WT++KGM:12000'",
+                "LOC+9+%s'" % pol, "LOC+11+%s'" % pod,
+                "EQD+CN+%s+2200+++5'" % cn]
+    out += ["UNT+9+1'", "UNZ+1+1'"]
+    return "\n".join(out)
+
+
+def test_nn_folders():
+    print("\n[32] 0.11 N_N 방향 폴더 — 같은 토큰 기항만 (D)/(L) 로 나눈다(서류 표기는 그대로)")
+    import app_upload as au
+    import berth_schedule as bs
+
+    # ── (1) 꼬리표 도구 ───────────────────────────────────────────────
+    tags = [("2606N(D)", ("2606N", "discharge")), ("2606N(L)", ("2606N", "loading")),
+            ("2606n(d)", ("2606n", "discharge")), ("2606N ( L )", ("2606N", "loading")),
+            ("2643E", ("2643E", "")), ("", ("", "")),
+            ("SWSP 2606N (Excel)", ("SWSP 2606N (Excel)", ""))]
+    bad = [(n, w, au.split_dir_tag(n)) for n, w in tags if au.split_dir_tag(n) != w]
+    check("꼬리표 읽기 7종 — (D)/(L) 만 떼고 나머지는 이름 그대로", not bad, repr(bad[:2]))
+    check("꼬리표 붙이기 — 방향이 없으면 안 붙인다",
+          (au.tag_voy("2606N", "discharge"), au.tag_voy("2606N", "loading"),
+           au.tag_voy("2606N"), au.tag_voy("2606N", "")) ==
+          ("2606N(D)", "2606N(L)", "2606N", "2606N"))
+    check("폴더 방향 — 꼬리표가 있으면 꼬리표, 없으면 항차 끝 글자(종전 규칙)",
+          (au.folder_direction("/x/SWSP/2606N(L)", "2606N"),
+           au.folder_direction("/x/SWSP/2606N", "2606N"),
+           au.folder_direction("/x/STMJ/2644W", "2644W")) ==
+          ("loading", "discharge", "loading"))
+
+    # ── (2) N_N 판정 — 같은 토큰일 때만 ─────────────────────────────
+    nn_cache = {"pairs": {"SWSP": {"2606N": "2606N"}, "KBTR": {"2605W": "2605W"},
+                          "STMJ": {"2643E": "2644W", "2644W": "2643E"},
+                          "XTPG": {"534E": "534W", "534W": "534E"}}}
+    check("N_N 판정 — 짝이 자기 자신인 기항만 그렇다고 본다",
+          au.nn_token(nn_cache, "SWSP", "2606N") == "2606N"
+          and au.nn_token(nn_cache, "KBTR", "2605W") == "2605W")
+    check("N_N 판정 — ⛔ 토큰이 다른 일반 기항은 아니다(2643E/2644W · 534E/534W)",
+          au.nn_token(nn_cache, "STMJ", "2643E") == ""
+          and au.nn_token(nn_cache, "STMJ", "2644W") == ""
+          and au.nn_token(nn_cache, "XTPG", "534E") == "")
+    check("N_N 판정 — 짝 증거가 없으면 '' (번호만 보고 넘겨짚지 않는다)",
+          au.nn_token(nn_cache, "SWDN", "2608N") == ""
+          and au.nn_token({}, "SWSP", "2606N") == ""
+          and au.nn_token(nn_cache, "SWSP", "") == "")
+    check("N_N 판정 — 표기가 흔들려도 같은 항차면 잡는다(02606N)",
+          au.nn_token(nn_cache, "SWSP", "02606N") == "02606N")
+
+    # ── (3) 배정표 원문 짝 — 방향 필터가 비운 칸도 원문은 남는다 ────
+    http = _berth_http()
+    rows, why = bs.fetch_all(BERTH_CFG, None, opener=http, now_ms=BERTH_NOW)
+    check("배정표 — 실응답 픽스처를 그대로 읽는다", why is None and rows, str(why))
+    by = {}
+    for row in rows or []:
+        by.setdefault(row.get("vessel_code"), row)
+    swsp = by.get("SWSP") or {}
+    check("배정표 — N_N 줄의 판정값은 종전 그대로(뒤 항차는 여전히 비운다)",
+          swsp.get("voy_d") == "2606N" and swsp.get("voy_l") == "", repr(swsp.get("voy_l")))
+    check("배정표 — 원문 짝은 남는다(2606N/2606N)",
+          swsp.get("voy_raw_d") == "2606N" and swsp.get("voy_raw_l") == "2606N",
+          "%r/%r" % (swsp.get("voy_raw_d"), swsp.get("voy_raw_l")))
+    stmj = by.get("STMJ") or {}
+    check("배정표 — 일반 기항의 원문 짝은 서로 다르다(2643E/2644W)",
+          stmj.get("voy_raw_d") == "2643E" and stmj.get("voy_raw_l") == "2644W"
+          and stmj.get("voy_d") == "2643E" and stmj.get("voy_l") == "2644W")
+
+    plan = au.BerthPlan(rows)
+    cache = {"names": {}, "codes": {}, "tally": {}, "pairs": {}}
+    lines = []
+    got = au.promote_pairs(plan, cache, lines.append)
+    check("짝 승격 — N_N 기항은 '자기 자신이 짝'으로 올라간다(SWSP·SWDN·KBTR)",
+          au.paired_partner(cache, "SWSP", "2606N") == "2606N"
+          and au.paired_partner(cache, "SWDN", "2608N") == "2608N"
+          and au.paired_partner(cache, "KBTR", "2605W") == "2605W", "%d건" % got)
+    check("짝 승격 — 일반 기항은 종전 그대로 서로 다른 짝",
+          au.paired_partner(cache, "STMJ", "2643E") == "2644W"
+          and au.paired_partner(cache, "XTPG", "535E") == "535W")
+    check("짝 승격 — 한쪽만 있는 줄은 N_N 이 아니다(ATPR 2636W)",
+          au.paired_partner(cache, "ATPR", "2636W") == "")
+    check("짝 승격 — 두 번째 호출은 0건(멱등)", au.promote_pairs(plan, cache, lines.append) == 0)
+    check("N_N 판정 — 승격된 캐시로 SWSP·SWDN 은 N_N, STMJ 는 아니다",
+          au.nn_token(cache, "SWSP", "2606N") == "2606N"
+          and au.nn_token(cache, "SWDN", "2608N") == "2608N"
+          and au.nn_token(cache, "STMJ", "2643E") == "")
+
+    # ── (4) 폴더 이름 고르기 ────────────────────────────────────────
+    tmp = tempfile.mkdtemp(prefix="mailpilot_nn_")
+    log_dir = tempfile.mkdtemp(prefix="mailpilot_nn_log_")
+    try:
+        root = os.path.join(tmp, "MAILBOX")
+        os.makedirs(os.path.join(root, "SWSP", "2606N"), exist_ok=True)
+        check("폴더 이름 — mode 를 안 주면 종전 그대로(무표시 폴더)",
+              core.voyage_dirname(root, ["SWSP"], "2606N") == "2606N"
+              and core.voyage_dirname(root, ["SWSP"], "02606N") == "2606N")
+        check("폴더 이름 — mode 를 주면 아직 없는 방향 폴더 이름을 만든다",
+              core.voyage_dirname(root, ["SWSP"], "2606N", "discharge") == "2606N(D)"
+              and core.voyage_dirname(root, ["SWSP"], "02606N", "loading") == "2606N(L)")
+        os.makedirs(os.path.join(root, "SWSP", "2606N(D)"), exist_ok=True)
+        check("폴더 이름 — 이미 있는 방향 폴더 표기를 그대로 쓴다",
+              core.voyage_dirname(root, ["SWSP"], "02606N", "discharge") == "2606N(D)")
+        check("폴더 이름 — 방향 폴더가 생겨도 무표시 조회는 무표시 폴더를 준다",
+              core.voyage_dirname(root, ["SWSP"], "2606N") == "2606N")
+        check("정본 폴더 고르기 — 같은 꼬리표끼리만 본다",
+              au.canonical_voy_dirname(os.path.join(root, "SWSP"), "2606N") == "2606N"
+              and au.canonical_voy_dirname(os.path.join(root, "SWSP"), "2606N",
+                                           "discharge") == "2606N(D)"
+              and au.canonical_voy_dirname(os.path.join(root, "SWSP"), "2606N",
+                                           "loading") == "")
+        shutil.rmtree(root, ignore_errors=True)
+
+        # ── (5) 한 파일의 방향 판독 ──────────────────────────────
+        al = ["PTK", "KRPTK"]
+        dis_edi = _edi_leg("2606N", "SAWASDEE SPICA", "VNSGN", "KRPTK",
+                           ["ABCU1234567", "ABCU1234568"]).encode("utf-8")
+        load_edi = _edi_leg("2606N", "SAWASDEE SPICA", "KRPTK", "VNSGN",
+                            ["ZZZU7654321", "ZZZU7654322"]).encode("utf-8")
+        check("파일 방향 — 목적항이 우리 항인 EDI 는 양하",
+              au.file_direction("BAPLIE_SMDG22_2606N_VNSGN_SWSP.edi", dis_edi, al) == "discharge")
+        check("파일 방향 — 적재항이 우리 항인 EDI 는 선적",
+              au.file_direction("SWSP-2606N LOAD EDI FILE.EDI", load_edi, al) == "loading")
+        check("파일 방향 — 읽을 수 없는 서류(PDF)는 이름 힌트만, 없으면 불명",
+              au.file_direction("SWSP 2606N Summary.pdf", b"%PDF-1.4", al) == ""
+              and au.file_direction("STOW_PLAN_Departure_BTS_2606N.PDF", b"%PDF", al) == "")
+        check("파일 방향 — 이름 힌트(CDL/DISCH · CLL/LOAD)를 마지막에 본다",
+              au.file_direction("2606N DISCH LIST.pdf", b"%PDF", al) == "discharge"
+              and au.file_direction("2606N LOAD LIST.pdf", b"%PDF", al) == "loading")
+        check("파일 방향 — 파일 이름이 침묵하면 메일 제목을 본다",
+              au.file_direction("자료.pdf", b"%PDF", al, hint="SWSP 2606N DISCH 자료")
+              == "discharge"
+              and au.file_direction("자료.pdf", b"%PDF", al, hint="SWSP 2606N 자료") == "")
+        check("파일 방향 — 깨진 EDI 도 죽지 않는다(불명으로 돌려준다)",
+              au.file_direction("깨진.edi", b"\x00\x01\x02", al) == "")
+
+        # ── (6) 적재 분기 — 실제 메일로 ─────────────────────────
+        master = [{"code": "SWSP", "name": "SAWASDEE SPICA", "aliases": [], "ko": []},
+                  {"code": "STMJ", "name": "STAR MERAJ", "aliases": [], "ko": []}]
+        mail_cache = {"names": {}, "codes": {}, "tally": {},
+                      "pairs": {"SWSP": {"2606N": "2606N"},
+                                "STMJ": {"2643E": "2644W", "2644W": "2643E"}}}
+        collector = core.Collector(
+            {"mailbox_root": root, "home_port_aliases": al}, firebase=core.FirebaseREST(None),
+            cache_path=os.path.join(tmp, "cache.json"), log_dir=log_dir,
+            uidl_cache_path=os.path.join(tmp, "uidl.json"),
+            master_path=os.path.join(tmp, "master.json"),
+            upload_state_path=os.path.join(tmp, "state.json"))
+        collector.master = master
+        collector.cache = mail_cache
+        summary = {"unclassified": 0, "files": 0, "skipped": 0, "errors": 0, "vessels": []}
+        collector._handle_message(_mail_with_bodies(
+            "SWSP 2606N 자료 송부",
+            [("BAPLIE_SMDG22_2606N_VNSGN_SWSP.edi", dis_edi),
+             ("SWSP-2606N LOAD EDI FILE.EDI", load_edi),
+             ("SWSP 2606N Summary.pdf", b"%PDF-1.4 summary")]), root, summary)
+        base = os.path.join(root, "SWSP")
+        check("적재 — N_N 기항의 양하 EDI 는 (D) 폴더로",
+              os.path.isfile(os.path.join(base, "2606N(D)",
+                                          "BAPLIE_SMDG22_2606N_VNSGN_SWSP.edi")),
+              repr(sorted(os.listdir(base))))
+        check("적재 — N_N 기항의 선적 EDI 는 (L) 폴더로",
+              os.path.isfile(os.path.join(base, "2606N(L)", "SWSP-2606N LOAD EDI FILE.EDI")))
+        check("적재 — 방향을 못 가린 파일은 무표시 폴더에 그대로 둔다(추측 금지)",
+              os.path.isfile(os.path.join(base, "2606N", "SWSP 2606N Summary.pdf")))
+        check("적재 — 서류 표기(summary.vessels)에는 꼬리표가 안 붙는다",
+              [v["voyage"] for v in summary["vessels"]] == ["2606N"],
+              repr(summary["vessels"]))
+        collector._handle_message(_mail_with_bodies(
+            "STMJ 2643E 자료",
+            [("BAPLIE_2643E.edi", _edi_leg("2643E", "STAR MERAJ", "CNSHA", "KRPTK",
+                                           ["QQQU1111111"]).encode("utf-8"))]), root, summary)
+        check("적재 — ⛔ 일반 기항(토큰 다른 짝)의 폴더 구조는 그대로",
+              os.listdir(os.path.join(root, "STMJ")) == ["2643E"],
+              repr(os.listdir(os.path.join(root, "STMJ"))))
+
+        # ── (7) 그룹 스캔 · 업로드 ─────────────────────────────
+        _write(os.path.join(base, "2606N(D)", "SWSP ( 2606N ) CLL.xlsx"), "NOT-EXCEL")
+        cache2 = {"names": {}, "codes": {}, "tally": {}, "pairs": dict(mail_cache["pairs"])}
+        folders = au.voyage_folders(root, cache2, master, lines.append)
+        swsp_rows = [(v, os.path.basename(p)) for c, v, p, _n in folders if c == "SWSP"]
+        check("훑기 — (D)/(L) 폴더도 같은 항차(2606N)로 읽는다",
+              sorted(swsp_rows) == [("2606N", "2606N"), ("2606N", "2606N(D)"),
+                                    ("2606N", "2606N(L)")], repr(sorted(swsp_rows)))
+        groups = au.group_voyages(folders, cache2)
+        swsp_g = [g for g in groups if g[0] == "SWSP"]
+        stmj_g = [g for g in groups if g[0] == "STMJ"]
+        check("묶기 — 세 폴더가 한 기항으로 묶인다(키 하나)",
+              len(swsp_g) == 1 and len(swsp_g[0][2]) == 3 and swsp_g[0][1] == "2606N",
+              repr([(g[0], g[1], len(g[2])) for g in groups]))
+        check("묶기 — N_N 은 양하·선적 항차가 둘 다 그 항차다(voy_d = voy_l)",
+              (swsp_g[0][3], swsp_g[0][4]) == ("2606N", "2606N"))
+        check("묶기 — ⛔ 일반 기항은 종전 그대로(짝 증거의 반대쪽 항차가 선적이다)",
+              (stmj_g[0][3], stmj_g[0][4]) == ("2643E", "2644W"),
+              repr((stmj_g[0][3], stmj_g[0][4])))
+
+        db = FakeDB({})
+        cfg = {"berth_plan": False, "home_port_aliases": al}
+        state_path = os.path.join(tmp, "upload_state.json")
+        res = au.run(root, cache2, master, db, cfg, lines.append, state_path=state_path)
+        keys = sorted(k.split("/")[1] for k in db.data if k.endswith("/info"))
+        check("업로드 — 카드는 한 장이다(SWSP_2606N)", keys == ["STMJ_2643E", "SWSP_2606N"],
+              repr(keys))
+        info = db.data.get("voyages/SWSP_2606N/info") or {}
+        check("업로드 — info 의 항차 표기에 꼬리표가 없다(voy_d = voy_l = 2606N)",
+              info.get("voy") == "2606N" and info.get("voy_d") == "2606N"
+              and info.get("voy_l") == "2606N", repr(info))
+        dis = db.data.get("voyages/SWSP_2606N/discharge/ediContainers") or {}
+        load = db.data.get("voyages/SWSP_2606N/loading/ediContainers") or {}
+        check("업로드 — 양하 EDI 는 양하 노드에, 선적 EDI 는 선적 노드에",
+              sorted(dis) == ["ABCU1234567", "ABCU1234568"]
+              and sorted(load) == ["ZZZU7654321", "ZZZU7654322"],
+              "%r / %r" % (sorted(dis), sorted(load)))
+        leak = [p for p, obj in db.data.items()
+                if "(D)" in json.dumps(obj, ensure_ascii=False)
+                or "(L)" in json.dumps(obj, ensure_ascii=False)]
+        check("업로드 — ★ 서버 어디에도 (D)/(L) 문자열이 없다(info·records·raw 전수)",
+              not leak, repr(leak[:3]))
+        res2 = au.run(root, cache2, master, db, cfg, lines.append, state_path=state_path)
+        check("업로드 — 두 번째 사이클은 재처리 0(멱등)",
+              res2["changed"] == 0 and res2["skipped"] == res["voyages"],
+              "changed %d · skipped %d" % (res2["changed"], res2["skipped"]))
+        shutil.rmtree(root, ignore_errors=True)
+
+        # ── (8) 리스트 방향 — 꼬리표는 마지막 근거일 뿐 ────────────
+        check("리스트 — 내용·이름으로 가려지면 꼬리표는 안 쓴다(내용이 먼저)",
+              au.list_mode(0, 9, "SWSP ( 2606N ) CLL.xlsx") == "loading"
+              and au.list_mode(9, 0, "SWSP ( 2606N ) CLL.xlsx") == "discharge")
+        lst_dir = os.path.join(tmp, "L")
+        os.makedirs(os.path.join(lst_dir, "2606N(L)"), exist_ok=True)
+        os.makedirs(os.path.join(lst_dir, "2606N"), exist_ok=True)
+        sheet = [["CNTR NO", "SIZE", "SEAL"], ["ABCU1234567", "22G0", "S1"]]
+        blob = _xlsx_bytes(sheet)
+        if blob is None:
+            check("리스트 — 꼬리표 되받이(openpyxl 없음)", True, "건너뜀")
+        else:
+            for sub in ("2606N(L)", "2606N"):
+                with open(os.path.join(lst_dir, sub, "CNTR LIST.xlsx"), "wb") as fh:
+                    fh.write(blob)
+            tagged = au.scan_lists(os.path.join(lst_dir, "2606N(L)"), ["CNTR LIST.xlsx"],
+                                   al, lines.append, "loading", tagged=True)
+            plain = au.scan_lists(os.path.join(lst_dir, "2606N"), ["CNTR LIST.xlsx"],
+                                  al, lines.append, "discharge", tagged=False)
+            check("리스트 — 방향 폴더의 꼬리표는 다 실패했을 때만 쓴다",
+                  [f["mode"] for f in tagged] == ["loading"], repr(tagged))
+            check("리스트 — ⛔ 무표시 폴더의 E/W 는 여전히 근거로 쓰지 않는다(0.9 확정)",
+                  plain == [], repr(plain))
+
+        # ── (9) 마이그레이션 — 기존 폴더 나누기 ──────────────────
+        root2 = os.path.join(tmp, "MB2")
+        for name, data in (("BAPLIE_2606N.edi", dis_edi),
+                           ("SWSP-2606N LOAD EDI FILE.EDI", load_edi),
+                           ("SWSP 2606N.pdf", b"%PDF-1.4")):
+            path = os.path.join(root2, "SWSP", "2606N", name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
+        keep = os.path.join(root2, "STMJ", "2643E", "BAPLIE_2643E.edi")
+        os.makedirs(os.path.dirname(keep), exist_ok=True)
+        with open(keep, "wb") as fh:
+            fh.write(_edi_leg("2643E", "STAR MERAJ", "CNSHA", "KRPTK",
+                              ["QQQU1111111"]).encode("utf-8"))
+        # 충돌 자리 하나를 미리 만들어 둔다 — 덮지 않고 건너뛰는지 본다
+        crash = os.path.join(root2, "SWSP", "2606N(D)", "BAPLIE_2606N.edi")
+        os.makedirs(os.path.dirname(crash), exist_ok=True)
+        with open(crash, "wb") as fh:
+            fh.write(b"ORIGINAL")
+        st_path = os.path.join(tmp, "mig_state.json")
+        au.save_state({"_v": au.STATE_V, "folders": {"SWSP/2606N": {"fp": "x"},
+                                                     "STMJ/2643E": {"fp": "y"}}}, st_path)
+        before = sorted(f for _d, _s, fs in os.walk(root2) for f in fs)
+        out = au.split_nn_folders(root2, mail_cache, master, al, lines.append, st_path)
+        after = sorted(f for _d, _s, fs in os.walk(root2) for f in fs)
+        check("이관 — 파일은 하나도 잃지 않는다(옮기기만)", before == after,
+              "%d → %d" % (len(before), len(after)))
+        check("이관 — 선적 EDI 가 (L) 폴더로 갔다",
+              os.path.isfile(os.path.join(root2, "SWSP", "2606N(L)",
+                                          "SWSP-2606N LOAD EDI FILE.EDI")))
+        check("이관 — 같은 이름이 이미 있으면 덮지 않고 건너뛴다",
+              out["skipped"] == 1
+              and open(crash, "rb").read() == b"ORIGINAL"
+              and os.path.isfile(os.path.join(root2, "SWSP", "2606N", "BAPLIE_2606N.edi")),
+              repr(out))
+        check("이관 — 방향을 못 가린 파일은 무표시 폴더에 남는다",
+              os.path.isfile(os.path.join(root2, "SWSP", "2606N", "SWSP 2606N.pdf"))
+              and out["left"] == 1
+              and sorted(os.listdir(os.path.join(root2, "SWSP", "2606N")))
+              == ["BAPLIE_2606N.edi", "SWSP 2606N.pdf"], repr(out))
+        check("이관 — ⛔ 일반 기항 폴더는 손대지 않는다(STMJ 2643E)",
+              sorted(os.listdir(os.path.join(root2, "STMJ"))) == ["2643E"]
+              and os.path.isfile(keep))
+        state = au.load_state(st_path)
+        check("이관 — 나눈 선박의 업로드 지문만 무효화한다",
+              "SWSP/2606N" not in state["folders"] and "STMJ/2643E" in state["folders"],
+              repr(sorted(state["folders"])))
+        out2 = au.split_nn_folders(root2, mail_cache, master, al, lines.append, st_path)
+        check("이관 — 두 번 돌려도 옮기는 것이 없다(멱등)",
+              out2["moved"] == 0 and out2["split"] == [], repr(out2))
+
+        # 빈 껍데기만 남으면 치운다
+        root3 = os.path.join(tmp, "MB3")
+        for name, data in (("BAPLIE_2606N.edi", dis_edi),
+                           ("SWSP-2606N LOAD.EDI", load_edi)):
+            path = os.path.join(root3, "SWSP", "2606N", name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
+        au.split_nn_folders(root3, mail_cache, master, al, lines.append)
+        check("이관 — 파일이 다 빠진 무표시 폴더는 치운다(빈 폴더만)",
+              sorted(os.listdir(os.path.join(root3, "SWSP"))) == ["2606N(D)", "2606N(L)"],
+              repr(sorted(os.listdir(os.path.join(root3, "SWSP")))))
+
+        # ── (10) 표기 병합은 같은 꼬리표끼리만 ────────────────────
+        root4 = os.path.join(tmp, "MB4")
+        for sub, fname in (("2606N(D)", "a.edi"), ("2606N(D)", "a2.edi"),
+                           ("02606N(D)", "b.edi"), ("2606N(L)", "c.edi")):
+            _write(os.path.join(root4, "SWSP", sub, fname), "X")   # 자료 많은 쪽이 정본
+        au.merge_voy_dirs(os.path.join(root4, "SWSP"), lines.append)
+        left = sorted(os.listdir(os.path.join(root4, "SWSP")))
+        check("표기 병합 — (D)끼리만 합치고 (L)은 그대로 둔다",
+              left == ["2606N(D)", "2606N(L)"]
+              and sorted(os.listdir(os.path.join(root4, "SWSP", "2606N(D)")))
+              == ["a.edi", "a2.edi", "b.edi"]
+              and os.listdir(os.path.join(root4, "SWSP", "2606N(L)")) == ["c.edi"],
+              repr(left))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(log_dir, ignore_errors=True)
+
+
 def main():
     print("=" * 60)
     print("메일파일럿 Uni 테스트 — %s (python %s)"
@@ -4521,6 +4858,7 @@ def main():
     test_list_parser()
     test_list_upload()
     test_content_read()
+    test_nn_folders()
 
     failed =[name for name, ok, _d in RESULTS if not ok]
     print("\n" + "=" * 60)

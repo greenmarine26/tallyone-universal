@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 
 import app_upload                                       # 0.5 — 앱 채우기(항차·EDI 를 검수앱에 올린다)
 
-VERSION = "MailPilot Uni 0.10"
+VERSION = "MailPilot Uni 0.11"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -901,14 +901,23 @@ def save_attachment(root, subdirs, filename, data):
     return "saved", path
 
 
-def voyage_dirname(root, parts, voy):
+def voyage_dirname(root, parts, voy, mode=""):
     """적재할 항차 폴더 이름 — 같은 항차인 기존 폴더가 있으면 **그 표기**를 쓴다(0.5-01).
 
     parts 는 항차 폴더의 부모 경로 조각([코드] 또는 [_기타, 코드]).
     선사가 같은 항차를 0535E / 535E 로 섞어 써도 폴더가 갈라지지 않는다.
+
+    0.11 — mode('discharge'|'loading')를 주면 **방향 폴더** `{voy}(D)`/`{voy}(L)` 이름을 준다.
+    N_N 기항(양하·선적 항차가 같은 토큰)에서만 부른다. 방향 폴더가 아직 없으면 표기는
+    무표시 정본 폴더를 따르고 꼬리표만 붙인다(0535E 폴더가 있으면 0535E(D)).
     """
     base = os.path.join(root, *[safe_name(p) for p in parts])
-    return app_upload.canonical_voy_dirname(base, voy) or voy
+    found = app_upload.canonical_voy_dirname(base, voy, mode)
+    if found:
+        return found
+    if mode:
+        return app_upload.tag_voy(app_upload.canonical_voy_dirname(base, voy) or voy, mode)
+    return voy
 
 
 def unclassified_dirname(subject, when=None):
@@ -1188,7 +1197,7 @@ def move_file_into(src, dst_dir, log_dir=None):
     return "moved", path
 
 
-def reclassify_unfiled(root, cache, master, log_dir=None, state_path=None):
+def reclassify_unfiled(root, cache, master, log_dir=None, state_path=None, cfg=None):
     """기동 시 1회 — _미분류 에 남은 메일을 다시 판독해 제 폴더로 옮긴다(멱등).
 
     돌려주는 값: {"reclassified": [{folder, code, voyage, files}], "moved": 파일수,
@@ -1254,9 +1263,37 @@ def reclassify_unfiled(root, cache, master, log_dir=None, state_path=None):
             result["errors"] += 1
             result["left"] += 1
             continue
+        # 0.11 — N_N 기항이면 파일마다 방향을 읽어 `{voy}(D)`/`(L)` 로 나눠 넣는다.
+        nn = app_upload.nn_token(cache, code, target["voyage"])
+        aliases = app_upload.home_aliases(cfg) if nn else None
         moved_here = 0
         for fname in files:
-            status, _path = move_file_into(os.path.join(folder, fname), dst, log_dir)
+            here = dst
+            if nn:
+                src = os.path.join(folder, fname)
+                try:
+                    with open(src, "rb") as fh:
+                        blob = fh.read()
+                except OSError as exc:
+                    blob = b""
+                    log("미분류 재판독 — 방향 판독을 못 했습니다(%s): %s" % (fname, exc), log_dir)
+                mode = app_upload.file_direction(fname, blob, aliases,
+                                                 lambda msg: log(msg, log_dir),
+                                                 hint=unfiled_subject(name))
+                if mode:
+                    here = os.path.join(root, safe_name(code),
+                                        safe_name(voyage_dirname(root, [code],
+                                                                 target["voyage"], mode)))
+                    try:
+                        os.makedirs(here, exist_ok=True)
+                    except OSError as exc:
+                        log("미분류 재판독 — 방향 폴더를 만들지 못해 무표시로 둡니다: %s (%s)"
+                            % (here, exc), log_dir)
+                        here = dst
+                else:
+                    log("미분류 재판독 — ⚠ 방향을 못 가려 무표시 폴더에 둡니다: %s/%s"
+                        % (voy_dir, fname), log_dir)
+            status, _path = move_file_into(os.path.join(folder, fname), here, log_dir)
             if status == "moved":
                 moved_here += 1
                 result["moved"] += 1
@@ -1734,7 +1771,8 @@ class Collector:
         try:
             result = reclassify_unfiled(root, self.cache, self.master,
                                         log_dir=self.log_dir,
-                                        state_path=self.upload_state_path)
+                                        state_path=self.upload_state_path,
+                                        cfg=self.cfg)
         except Exception as exc:                     # 재판독이 죽어도 수집은 계속한다
             log("미분류 재판독 중 예기치 못한 오류: %s: %s" % (type(exc).__name__, exc),
                 self.log_dir)
@@ -1941,6 +1979,9 @@ class Collector:
             # 0.5-01 — 같은 항차인 기존 폴더가 있으면 그 표기로 적재한다(0535E → 535E)
             voy_dir = voyage_dirname(root, parts, target["voyage"])
             subdirs = parts + [voy_dir]
+            # 0.11 — 양하·선적 항차가 같은 토큰인 기항(N_N)은 파일마다 방향을 읽어
+            #   `{voy}(D)` · `{voy}(L)` 로 나눠 담는다. 서류 표기는 voy_dir 그대로다.
+            nn = app_upload.nn_token(self.cache, target["code"], target["voyage"])
             if voy_dir != target["voyage"]:
                 log("항차 표기 정규화 — %s 은(는) 기존 항차 %s 로 적재합니다."
                     % (target["voyage"], voy_dir), self.log_dir)
@@ -1952,13 +1993,25 @@ class Collector:
                 log("대상 아님 — _기타 적재: %s %s (%s)"
                     % (target["code"], voy_dir, subject), self.log_dir)
         else:
+            nn = ""
             subdirs = [UNCLASSIFIED_DIR, unclassified_dirname(subject, when)]
             summary["unclassified"] += 1
             log("미분류(%s): %s — 발신 %s" % (target["reason"], subject, sender), self.log_dir)
 
+        aliases = app_upload.home_aliases(self.cfg) if nn else None
         for name, data in attachments:
+            where = subdirs
+            if nn:
+                mode = app_upload.file_direction(name, data, aliases,
+                                                 lambda msg: log(msg, self.log_dir),
+                                                 hint=subject)
+                if mode:
+                    where = parts + [voyage_dirname(root, parts, target["voyage"], mode)]
+                else:
+                    log("  ⚠ 방향을 못 가려 무표시 폴더에 둡니다(사람이 확인해 주세요): %s/%s"
+                        % (voy_dir, name), self.log_dir)
             try:
-                status, path = save_attachment(root, subdirs, name, data)
+                status, path = save_attachment(root, where, name, data)
             except OSError as exc:
                 log("첨부 저장 실패(%s): %s" % (name, exc), self.log_dir)
                 summary["errors"] += 1

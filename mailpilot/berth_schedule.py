@@ -139,7 +139,8 @@ def _http(url, data=None, headers=None, timeout=TIMEOUT, opener=None):
 
 def _blank_row(terminal):
     return {"terminal": terminal, "vessel_code": "", "vessel_name": "", "master_vvd": "",
-            "voy_d": "", "voy_l": "", "route": "", "eta": "", "etb": "", "etd": "",
+            "voy_d": "", "voy_l": "", "voy_raw_d": "", "voy_raw_l": "",
+            "route": "", "eta": "", "etb": "", "etd": "",
             "ata": "", "atb": "", "atd": "", "berth": "", "berth_raw": "", "pier": terminal,
             "status": "", "status_raw": "", "departed": False,
             "dis_van": "", "load_van": ""}
@@ -150,9 +151,13 @@ def _set_pair(row, first, second, note):
 
     실측 예: `2606N-2606N`(SWSP) 처럼 두 쪽이 같은 왕복 항차, `2605W-2605W`(KBTR) 처럼
     앞쪽이 선적 표기인 줄이 있다. 그런 칸은 넘겨짚지 않고 비운다.
+
+    0.11 — 방향 필터로 비운 칸도 **원문은 남긴다**(voy_raw_d·voy_raw_l). 두 쪽이 같은 토큰인
+    N_N 기항(2606N/2606N)을 알아보는 유일한 근거이고, 판정에는 여전히 voy_d/voy_l 만 쓴다.
     """
     first = re.sub(r"[^A-Za-z0-9]", "", str(first or "")).upper()
     second = re.sub(r"[^A-Za-z0-9]", "", str(second or "")).upper()
+    row["voy_raw_d"], row["voy_raw_l"] = first, second
     if first:
         if first[-1] in ("E", "N"):
             row["voy_d"] = first
